@@ -1,0 +1,6 @@
+{
+  "name": "LishEdInfo",
+  "description": "Aplikasi editor informasi lagu MP3 (judul, artis, album, dan cover art) yang ringan, intuitif, dan aman untuk pemutar musik bawaan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
