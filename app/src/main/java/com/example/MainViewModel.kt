@@ -185,7 +185,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateCoverImage(bitmap: Bitmap) {
         viewModelScope.launch(Dispatchers.IO) {
-            val bytes = ImageUtils.compressBitmapToCoverBytes(bitmap, quality = 88, maxDimension = 1000)
+            val bytes = ImageUtils.compressBitmapToCoverBytes(bitmap, quality = 88, maxDimension = 800)
             _uiState.update { state ->
                 val meta = state.metadata?.copy(
                     coverImageBytes = bytes,
@@ -232,17 +232,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val safeFileName = "${targetTitle} - ${targetArtist}.mp3"
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
-                // Keep local cache copy of exported file for immediate in-app player preview
-                val exportedCacheFile = File(context.cacheDir, "exported_preview.mp3")
+                // Always write to a brand-new temporary file to prevent self-truncation
+                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.mp3")
+                val previewFile = File(context.cacheDir, "current_editing.mp3")
 
                 val resultUri: Uri? = withContext(Dispatchers.IO) {
-                    // Export to cache file first to ensure complete write and instant in-app playback
-                    FileOutputStream(exportedCacheFile).use { out ->
+                    // Export to temporary file first
+                    FileOutputStream(tempFile).use { out ->
                         Mp3Id3Engine.exportMp3(source, meta, out)
                     }
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        // Delete previous duplicate with exact same display name if any
+                        // Delete previous duplicate in MediaStore if any
                         try {
                             val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ? AND ${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
                             val selectionArgs = arrayOf(safeFileName, "%LishEdInfo%")
@@ -262,7 +263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
                         if (uri != null) {
                             context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
-                                exportedCacheFile.inputStream().use { input ->
+                                tempFile.inputStream().use { input ->
                                     input.copyTo(out)
                                 }
                             }
@@ -270,7 +271,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
                             context.contentResolver.update(uri, contentValues, null, null)
 
-                            // Trigger MediaScanner to parse new tags and album art thumbnail into MediaStore
+                            // Save folder cover image (cover.jpg) for stock music players
+                            if (meta.coverImageBytes != null && meta.coverImageBytes.isNotEmpty()) {
+                                try {
+                                    val coverValues = ContentValues().apply {
+                                        put(MediaStore.Images.Media.DISPLAY_NAME, "cover.jpg")
+                                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LishEdInfo")
+                                    }
+                                    try {
+                                        context.contentResolver.delete(
+                                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                            "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?",
+                                            arrayOf("cover.jpg", "%LishEdInfo%")
+                                        )
+                                    } catch (ignored: Exception) {}
+
+                                    val coverUri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, coverValues)
+                                    coverUri?.let { cUri ->
+                                        context.contentResolver.openOutputStream(cUri, "wt")?.use { cOut ->
+                                            cOut.write(meta.coverImageBytes)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+
+                            // Trigger MediaScanner for stock music player indexing
                             var physicalPath: String? = null
                             try {
                                 val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null)
@@ -289,20 +317,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
                         val outFolder = File(musicDir, "LishEdInfo").apply { mkdirs() }
                         val outFile = File(outFolder, safeFileName)
-                        exportedCacheFile.copyTo(outFile, overwrite = true)
+                        tempFile.copyTo(outFile, overwrite = true)
+
+                        if (meta.coverImageBytes != null && meta.coverImageBytes.isNotEmpty()) {
+                            val coverFile = File(outFolder, "cover.jpg")
+                            FileOutputStream(coverFile).use { it.write(meta.coverImageBytes) }
+                            MediaScannerConnection.scanFile(context, arrayOf(coverFile.absolutePath), arrayOf("image/jpeg"), null)
+                        }
+
                         MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf("audio/mpeg"), null)
                         Uri.fromFile(outFile)
                     }
                 }
 
                 if (resultUri != null) {
-                    // Update player with newly exported file so user can test it right now
-                    prepareAudioPlayer(exportedCacheFile)
+                    // Update in-app player with clean preview file
+                    tempFile.copyTo(previewFile, overwrite = true)
+                    tempFile.delete()
+                    prepareAudioPlayer(previewFile)
 
                     _uiState.update {
                         it.copy(
                             isExporting = false,
-                            sourceFile = exportedCacheFile,
+                            sourceFile = previewFile,
                             statusMessage = "Berhasil disimpan! Lagu siap diputar di pemutar musik.",
                             exportedSuccessUri = resultUri,
                             exportedFileName = safeFileName,
@@ -310,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 } else {
+                    tempFile.delete()
                     throw IllegalStateException("Gagal membuat file penyimpanan.")
                 }
             } catch (e: Exception) {
@@ -332,21 +370,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isExporting = true, statusMessage = "Mengekspor file MP3...") }
             try {
                 val context = getApplication<Application>()
-                val exportedCacheFile = File(context.cacheDir, "exported_preview.mp3")
+                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.mp3")
+                val previewFile = File(context.cacheDir, "current_editing.mp3")
 
                 withContext(Dispatchers.IO) {
-                    FileOutputStream(exportedCacheFile).use { out ->
+                    FileOutputStream(tempFile).use { out ->
                         Mp3Id3Engine.exportMp3(source, meta, out)
                     }
                     context.contentResolver.openOutputStream(destinationUri, "wt")?.use { out ->
-                        exportedCacheFile.inputStream().use { input ->
+                        tempFile.inputStream().use { input ->
                             input.copyTo(out)
                         }
                     }
                 }
 
-                // Update player with newly exported file
-                prepareAudioPlayer(exportedCacheFile)
+                tempFile.copyTo(previewFile, overwrite = true)
+                tempFile.delete()
+                prepareAudioPlayer(previewFile)
 
                 val targetTitle = meta.title.ifBlank { "Lagu" }.trim()
                 val fileName = getFileNameFromUri(context, destinationUri) ?: "${targetTitle}.mp3"
@@ -354,7 +394,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         isExporting = false,
-                        sourceFile = exportedCacheFile,
+                        sourceFile = previewFile,
                         statusMessage = "Ekspor selesai! MP3 berhasil disimpan.",
                         exportedSuccessUri = destinationUri,
                         exportedFileName = fileName,

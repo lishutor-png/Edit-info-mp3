@@ -62,34 +62,6 @@ object Mp3Id3Engine {
                 audioStart = 0L
             }
 
-            // Verify and scan for the first MPEG audio frame sync word starting at audioStart
-            // Discards any padding bytes (0x00) or garbage between the tag and audio stream.
-            val scanLen = minOf(65536, (fileLength - audioStart).toInt())
-            if (scanLen > 4) {
-                raf.seek(audioStart)
-                val scanBuf = ByteArray(scanLen)
-                val read = raf.read(scanBuf)
-                if (read > 4) {
-                    for (i in 0 until read - 3) {
-                        val b0 = scanBuf[i].toInt() and 0xFF
-                        val b1 = scanBuf[i + 1].toInt() and 0xFF
-                        // Frame sync: 11 consecutive 1s (0xFF, followed by 111x xxxx)
-                        if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
-                            val layer = (b1 shr 1) and 0x03
-                            if (layer != 0) { // Valid MPEG layer (Layer I, II, or III)
-                                val b2 = scanBuf[i + 2].toInt() and 0xFF
-                                val bitrateIdx = (b2 shr 4) and 0x0F
-                                val sampleRateIdx = (b2 shr 2) and 0x03
-                                if (bitrateIdx != 0x0F && sampleRateIdx != 0x03) {
-                                    audioStart += i
-                                    break
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             var audioEnd = fileLength
             var hasId3v1 = false
 
@@ -101,25 +73,6 @@ object Mp3Id3Engine {
                 if (tag[0] == 'T'.code.toByte() && tag[1] == 'A'.code.toByte() && tag[2] == 'G'.code.toByte()) {
                     hasId3v1 = true
                     audioEnd = fileLength - 128
-                }
-            }
-
-            // Check for APEv2 trailer before ID3v1 or EOF
-            if (audioEnd >= 32) {
-                raf.seek(audioEnd - 32)
-                val apeHeader = ByteArray(8)
-                raf.readFully(apeHeader)
-                if (String(apeHeader, StandardCharsets.US_ASCII) == "APETAGEX") {
-                    val sizeBuf = ByteArray(4)
-                    raf.seek(audioEnd - 32 + 12)
-                    raf.readFully(sizeBuf)
-                    val apeSize = (sizeBuf[0].toLong() and 0xFF) or
-                            ((sizeBuf[1].toLong() and 0xFF) shl 8) or
-                            ((sizeBuf[2].toLong() and 0xFF) shl 16) or
-                            ((sizeBuf[3].toLong() and 0xFF) shl 24)
-                    if (apeSize in 32..audioEnd) {
-                        audioEnd -= apeSize
-                    }
                 }
             }
 
