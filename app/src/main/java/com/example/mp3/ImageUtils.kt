@@ -11,25 +11,25 @@ import kotlin.math.min
 object ImageUtils {
 
     /**
-     * Decode Uri to Bitmap, downsampling if needed to avoid out of memory.
+     * Reads image bytes from Uri in a single operation to prevent transient stream closure errors,
+     * then decodes into an optimized, memory-safe Bitmap.
      */
     fun decodeSampledBitmapFromUri(context: Context, uri: Uri, reqWidth: Int = 1000, reqHeight: Int = 1000): Bitmap? {
         return try {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null || bytes.isEmpty()) return null
+
             val options = BitmapFactory.Options().apply {
                 inJustDecodeBounds = true
             }
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, options)
-            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 
             if (options.outWidth <= 0 || options.outHeight <= 0) return null
 
             options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
             options.inJustDecodeBounds = false
 
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, options)
-            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -37,9 +37,9 @@ object ImageUtils {
     }
 
     /**
-     * Compress bitmap into optimized JPEG byte array for ID3 APIC frame.
+     * Compress bitmap into clean, high-quality JPEG byte array for ID3 APIC frame.
      */
-    fun compressBitmapToCoverBytes(bitmap: Bitmap, quality: Int = 85, maxDimension: Int = 1000): ByteArray {
+    fun compressBitmapToCoverBytes(bitmap: Bitmap, quality: Int = 88, maxDimension: Int = 1000): ByteArray {
         val scaled = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
             val ratio = min(maxDimension.toFloat() / bitmap.width, maxDimension.toFloat() / bitmap.height)
             val newW = max(1, (bitmap.width * ratio).toInt())

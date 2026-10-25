@@ -568,6 +568,10 @@ fun LishEdInfoSimplifiedScreen(viewModel: MainViewModel) {
                 ExportSuccessDialog(
                     fileName = uiState.exportedFileName ?: "Lagu.mp3",
                     onDismiss = { viewModel.dismissSuccessDialog() },
+                    onPlayInApp = {
+                        viewModel.dismissSuccessDialog()
+                        viewModel.togglePlayPause()
+                    },
                     onOpenDefaultPlayer = {
                         uiState.exportedSuccessUri?.let { uri ->
                             try {
@@ -803,6 +807,7 @@ fun UnifiedHeroSection(
 fun ExportSuccessDialog(
     fileName: String,
     onDismiss: () -> Unit,
+    onPlayInApp: () -> Unit,
     onOpenDefaultPlayer: () -> Unit,
     onShareFile: () -> Unit
 ) {
@@ -829,7 +834,7 @@ fun ExportSuccessDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "File MP3 siap diputar di pemutar musik bawaan hp Anda.",
+                    text = "File MP3 Anda telah diperbarui dengan metadata & sampul baru secara aman.",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Surface(
@@ -846,35 +851,57 @@ fun ExportSuccessDialog(
                     )
                 }
                 Text(
-                    text = "Kualitas audio 100% terjaga dan tidak rusak.",
+                    text = "Aliran audio MPEG 100% terjaga dan siap diputar langsung di HP Anda.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         },
         confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onShareFile,
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Bagikan")
-                }
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Button(
-                    onClick = onOpenDefaultPlayer,
-                    shape = RoundedCornerShape(12.dp)
+                    onClick = onPlayInApp,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Putar Lagu")
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Putar Sekarang di LishEdInfo")
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onShareFile,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Bagikan")
+                    }
+                    OutlinedButton(
+                        onClick = onOpenDefaultPlayer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Buka Pemutar")
+                    }
                 }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Selesai")
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Tutup", textAlign = TextAlign.Center)
             }
         }
     )

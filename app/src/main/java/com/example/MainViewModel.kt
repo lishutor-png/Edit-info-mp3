@@ -232,8 +232,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val safeFileName = "${targetTitle} - ${targetArtist}.mp3"
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
+                // Keep local cache copy of exported file for immediate in-app player preview
+                val exportedCacheFile = File(context.cacheDir, "exported_preview.mp3")
+
                 val resultUri: Uri? = withContext(Dispatchers.IO) {
+                    // Export to cache file first to ensure complete write and instant in-app playback
+                    FileOutputStream(exportedCacheFile).use { out ->
+                        Mp3Id3Engine.exportMp3(source, meta, out)
+                    }
+
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        // Delete previous duplicate with exact same display name if any
+                        try {
+                            val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ? AND ${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
+                            val selectionArgs = arrayOf(safeFileName, "%LishEdInfo%")
+                            context.contentResolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, selection, selectionArgs)
+                        } catch (ignored: Exception) {}
+
                         val contentValues = ContentValues().apply {
                             put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
                             put(MediaStore.Audio.Media.TITLE, targetTitle)
@@ -246,30 +261,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                         val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
                         if (uri != null) {
-                            context.contentResolver.openOutputStream(uri)?.use { out ->
-                                Mp3Id3Engine.exportMp3(source, meta, out)
+                            context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                                exportedCacheFile.inputStream().use { input ->
+                                    input.copyTo(out)
+                                }
                             }
                             contentValues.clear()
                             contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
                             context.contentResolver.update(uri, contentValues, null, null)
+
+                            // Trigger MediaScanner to parse new tags and album art thumbnail into MediaStore
+                            var physicalPath: String? = null
+                            try {
+                                val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null)
+                                cursor?.use { c ->
+                                    if (c.moveToFirst()) physicalPath = c.getString(0)
+                                }
+                            } catch (ignored: Exception) {}
+
+                            if (physicalPath.isNullOrBlank()) {
+                                physicalPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "LishEdInfo/$safeFileName").absolutePath
+                            }
+                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg"), null)
                         }
                         uri
                     } else {
                         val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
                         val outFolder = File(musicDir, "LishEdInfo").apply { mkdirs() }
                         val outFile = File(outFolder, safeFileName)
-                        FileOutputStream(outFile).use { out ->
-                            Mp3Id3Engine.exportMp3(source, meta, out)
-                        }
+                        exportedCacheFile.copyTo(outFile, overwrite = true)
                         MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf("audio/mpeg"), null)
                         Uri.fromFile(outFile)
                     }
                 }
 
                 if (resultUri != null) {
+                    // Update player with newly exported file so user can test it right now
+                    prepareAudioPlayer(exportedCacheFile)
+
                     _uiState.update {
                         it.copy(
                             isExporting = false,
+                            sourceFile = exportedCacheFile,
                             statusMessage = "Berhasil disimpan! Lagu siap diputar di pemutar musik.",
                             exportedSuccessUri = resultUri,
                             exportedFileName = safeFileName,
@@ -299,11 +332,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isExporting = true, statusMessage = "Mengekspor file MP3...") }
             try {
                 val context = getApplication<Application>()
+                val exportedCacheFile = File(context.cacheDir, "exported_preview.mp3")
+
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(destinationUri)?.use { out ->
+                    FileOutputStream(exportedCacheFile).use { out ->
                         Mp3Id3Engine.exportMp3(source, meta, out)
                     }
+                    context.contentResolver.openOutputStream(destinationUri, "wt")?.use { out ->
+                        exportedCacheFile.inputStream().use { input ->
+                            input.copyTo(out)
+                        }
+                    }
                 }
+
+                // Update player with newly exported file
+                prepareAudioPlayer(exportedCacheFile)
 
                 val targetTitle = meta.title.ifBlank { "Lagu" }.trim()
                 val fileName = getFileNameFromUri(context, destinationUri) ?: "${targetTitle}.mp3"
@@ -311,6 +354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         isExporting = false,
+                        sourceFile = exportedCacheFile,
                         statusMessage = "Ekspor selesai! MP3 berhasil disimpan.",
                         exportedSuccessUri = destinationUri,
                         exportedFileName = fileName,
