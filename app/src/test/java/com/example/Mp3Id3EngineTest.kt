@@ -111,4 +111,50 @@ class Mp3Id3EngineTest {
 
         assertTrue("Extracted audio bytes must be bit-identical to source audio", rawAudioPayload.contentEquals(extractedAudio))
     }
+
+    @Test
+    fun testFindOffsetsStripsPaddingBeforeFirstMpegFrame() {
+        val tempFile = tempFolder.newFile("test_padded.mp3")
+        val outStream = FileOutputStream(tempFile)
+
+        // 1. Write an ID3v2 tag of size 20 bytes
+        val dummyId3 = ByteArray(30)
+        dummyId3[0] = 'I'.code.toByte()
+        dummyId3[1] = 'D'.code.toByte()
+        dummyId3[2] = '3'.code.toByte()
+        dummyId3[3] = 3
+        dummyId3[4] = 0
+        dummyId3[5] = 0
+        dummyId3[6] = 0
+        dummyId3[7] = 0
+        dummyId3[8] = 0
+        dummyId3[9] = 20 // declared payload size = 20
+        outStream.write(dummyId3) // 30 bytes total (10 header + 20 payload)
+
+        // 2. Write 50 bytes of 0x00 padding
+        val padding = ByteArray(50)
+        outStream.write(padding)
+
+        // 3. Write 2 valid MPEG audio frames (MPEG-1 Layer 3, 128kbps, 44.1kHz, 417 bytes each)
+        val frameSize = 417
+        val frame1 = ByteArray(frameSize)
+        frame1[0] = 0xFF.toByte()
+        frame1[1] = 0xFB.toByte()
+        frame1[2] = 0x90.toByte()
+        frame1[3] = 0x64.toByte()
+
+        val frame2 = ByteArray(frameSize)
+        frame2[0] = 0xFF.toByte()
+        frame2[1] = 0xFB.toByte()
+        frame2[2] = 0x90.toByte()
+        frame2[3] = 0x64.toByte()
+
+        outStream.write(frame1)
+        outStream.write(frame2)
+        outStream.close()
+
+        val offsets = Mp3Id3Engine.findAudioStreamOffsets(tempFile)
+        // audioStartOffset must NOT be 30 (the old tag end); it MUST be 80 (where the real MPEG frame sync begins)!
+        assertEquals("audioStartOffset must accurately skip 50 bytes of padding to the true MPEG sync", 80L, offsets.audioStartOffset)
+    }
 }

@@ -254,9 +254,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
                             put(MediaStore.Audio.Media.TITLE, targetTitle)
                             put(MediaStore.Audio.Media.ARTIST, targetArtist)
-                            put(MediaStore.Audio.Media.ALBUM, meta.album)
+                            put(MediaStore.Audio.Media.ALBUM, meta.album.ifBlank { "LishEdInfo Album" })
                             put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
-                            put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LishEdInfo")
+                            put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LishEdInfo/")
                             put(MediaStore.Audio.Media.IS_PENDING, 1)
                         }
 
@@ -271,34 +271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
                             context.contentResolver.update(uri, contentValues, null, null)
 
-                            // Save folder cover image (cover.jpg) for stock music players
-                            if (meta.coverImageBytes != null && meta.coverImageBytes.isNotEmpty()) {
-                                try {
-                                    val coverValues = ContentValues().apply {
-                                        put(MediaStore.Images.Media.DISPLAY_NAME, "cover.jpg")
-                                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LishEdInfo")
-                                    }
-                                    try {
-                                        context.contentResolver.delete(
-                                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                            "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?",
-                                            arrayOf("cover.jpg", "%LishEdInfo%")
-                                        )
-                                    } catch (ignored: Exception) {}
-
-                                    val coverUri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, coverValues)
-                                    coverUri?.let { cUri ->
-                                        context.contentResolver.openOutputStream(cUri, "wt")?.use { cOut ->
-                                            cOut.write(meta.coverImageBytes)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-
-                            // Trigger MediaScanner for stock music player indexing
+                            // Trigger MediaScanner for immediate stock music player indexing
                             var physicalPath: String? = null
                             try {
                                 val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null)
@@ -310,7 +283,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (physicalPath.isNullOrBlank()) {
                                 physicalPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "LishEdInfo/$safeFileName").absolutePath
                             }
-                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg"), null)
+                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg")) { _, _ -> }
                         }
                         uri
                     } else {
@@ -320,9 +293,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         tempFile.copyTo(outFile, overwrite = true)
 
                         if (meta.coverImageBytes != null && meta.coverImageBytes.isNotEmpty()) {
-                            val coverFile = File(outFolder, "cover.jpg")
-                            FileOutputStream(coverFile).use { it.write(meta.coverImageBytes) }
-                            MediaScannerConnection.scanFile(context, arrayOf(coverFile.absolutePath), arrayOf("image/jpeg"), null)
+                            try {
+                                val coverFile = File(outFolder, "cover.jpg")
+                                FileOutputStream(coverFile).use { it.write(meta.coverImageBytes) }
+                                MediaScannerConnection.scanFile(context, arrayOf(coverFile.absolutePath), arrayOf("image/jpeg"), null)
+                            } catch (ignored: Exception) {}
                         }
 
                         MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf("audio/mpeg"), null)

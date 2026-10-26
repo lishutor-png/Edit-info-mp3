@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -47,5 +48,25 @@ class ExampleRobolectricTest {
     assertEquals("Artis Baru Diedit", reExtracted.artist)
     assertEquals("Album Baru Diedit", reExtracted.album)
     assertEquals(true, reExtracted.coverImageBytes != null)
+
+    val offsets = com.example.mp3.Mp3Id3Engine.findAudioStreamOffsets(outFile)
+    println("outFile length: ${outFile.length()}, audioStart: ${offsets.audioStartOffset}, audioEnd: ${offsets.audioEndOffset}")
+    assertTrue("Audio start offset must be > 0", offsets.audioStartOffset > 0)
+    assertTrue("Audio end offset must be > audio start", offsets.audioEndOffset > offsets.audioStartOffset)
+
+    // Verify that the byte at audioStartOffset is a valid MPEG sync header
+    val rafOut = java.io.RandomAccessFile(outFile, "r")
+    val atAudioStart = ByteArray(4)
+    rafOut.seek(offsets.audioStartOffset)
+    rafOut.readFully(atAudioStart)
+    rafOut.close()
+
+    val b0 = atAudioStart[0].toInt() and 0xFF
+    val b1 = atAudioStart[1].toInt() and 0xFF
+    println("Byte 0: ${String.format("%02X", b0)}, Byte 1: ${String.format("%02X", b1)}")
+    assertEquals(0xFF, b0)
+    assertEquals(0xE0, b1 and 0xE0)
+    val frameSize = com.example.mp3.Mp3Id3Engine.getMpegFrameSize(atAudioStart, 0, 4)
+    assertTrue("Must be a valid MPEG frame", frameSize > 0)
   }
 }
