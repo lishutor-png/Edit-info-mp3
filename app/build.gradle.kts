@@ -71,6 +71,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.coil.compose)
+    implementation(libs.mp3agic)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

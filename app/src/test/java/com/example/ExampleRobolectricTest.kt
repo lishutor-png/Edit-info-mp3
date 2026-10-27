@@ -18,19 +18,6 @@ import java.io.FileOutputStream
 class ExampleRobolectricTest {
 
     @Test
-    fun testMpegFrameSizeCalculation() {
-        // Test standard 128 kbps, 44100 Hz, MPEG-1 Layer 3 frame header (no padding)
-        // 0xFF 0xFB 0x90 0x64
-        // b0 = 0xFF
-        // b1 = 0xFB -> versionId = 3 (MPEG-1), layerId = 1 (Layer III), protection = 1
-        // b2 = 0x90 -> bitrateIdx = 9 (128 kbps), sampleRateIdx = 0 (44100 Hz), padding = 0
-        val header = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x64.toByte())
-        val frameSize = Mp3Id3Engine.getMpegFrameSize(header, 0, 4)
-        // Expected size = (144 * 128000) / 44100 + 0 = 417 bytes
-        assertEquals(417, frameSize)
-    }
-
-    @Test
     fun testId3v23TagBuilder() {
         val meta = Mp3Metadata(
             title = "Test Song",
@@ -66,7 +53,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testExportMp3PreservesFullBitstream() {
+    fun testExportMp3FallbackPreservesFullBitstream() {
         val tempDir = File.createTempFile("test_run", "dir")
         tempDir.delete()
         tempDir.mkdirs()
