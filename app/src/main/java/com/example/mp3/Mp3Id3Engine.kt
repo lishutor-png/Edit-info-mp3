@@ -85,7 +85,6 @@ object Mp3Id3Engine {
                 raf.readFully(apeHeader)
                 val apeStr = String(apeHeader, StandardCharsets.US_ASCII)
                 if (apeStr == "APETAGEX") {
-                    // Read APE tag size (32-bit little endian at offset 12 from start of footer)
                     val apeFooter = ByteArray(32)
                     raf.seek(audioEnd - 32)
                     raf.readFully(apeFooter)
@@ -99,8 +98,9 @@ object Mp3Id3Engine {
                 }
             }
 
-            // Trim any trailing null-padding bytes before audioEnd
-            audioEnd = trimTrailingNullBytes(raf, audioStart, audioEnd)
+            // Crucial: Do NOT trim trailing null bytes inside audio frames!
+            // MPEG Layer 3 frames often contain zero bits/bytes in their bit reservoir or Huffman data.
+            // Truncating them corrupts the last frame and causes container parsing errors in stock players.
 
             if (audioEnd <= audioStart) {
                 audioEnd = fileLength
@@ -112,11 +112,31 @@ object Mp3Id3Engine {
 
     /**
      * Scan forward from [startSearch] to find the first valid MPEG audio frame.
-     * Uses consecutive frame validation to avoid false positives in padding or metadata.
+     * First checks if [startSearch] is already at an MPEG sync word to preserve the Xing/Info frame.
      */
     private fun findFirstMpegSyncOffset(raf: RandomAccessFile, startSearch: Long, fileLength: Long): Long {
-        val maxSearch = minOf(startSearch + 262144L, fileLength - 4) // Scan up to 256KB for sync
-        var searchOffset = startSearch.coerceAtLeast(0L)
+        val safeStart = startSearch.coerceIn(0L, (fileLength - 4).coerceAtLeast(0L))
+        if (fileLength < 4) return safeStart
+
+        // 1. Direct check: Is there already an MPEG sync right at startSearch?
+        // This is true for 99.9% of MP3s and preserves the Xing/VBR header in frame 0.
+        val initialBytes = ByteArray(4)
+        raf.seek(safeStart)
+        val readInit = raf.read(initialBytes, 0, 4)
+        if (readInit == 4) {
+            val b0 = initialBytes[0].toInt() and 0xFF
+            val b1 = initialBytes[1].toInt() and 0xFF
+            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
+                val size = getMpegFrameSize(initialBytes, 0, 4)
+                if (size > 0) {
+                    return safeStart
+                }
+            }
+        }
+
+        // 2. Scan forward (up to 256KB) to skip any padding or junk bytes between ID3v2 and MPEG frames
+        val maxSearch = minOf(safeStart + 262144L, (fileLength - 4).coerceAtLeast(0L))
+        var searchOffset = safeStart
 
         val bufferSize = 16384
         val buffer = ByteArray(bufferSize + 4)
@@ -132,12 +152,10 @@ object Mp3Id3Engine {
                 val b0 = buffer[i].toInt() and 0xFF
                 val b1 = buffer[i + 1].toInt() and 0xFF
 
-                // Fast check: MPEG sync starts with 0xFF and top 3 bits of b1 are 1 (0xE0)
                 if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
                     val frameSize = getMpegFrameSize(buffer, i, read)
                     if (frameSize > 0) {
                         val candidatePos = searchOffset + i
-                        // Verify second frame at candidatePos + frameSize
                         if (verifyNextMpegFrame(raf, candidatePos + frameSize, fileLength)) {
                             return candidatePos
                         }
@@ -147,8 +165,8 @@ object Mp3Id3Engine {
             searchOffset += (read - 3)
         }
 
-        // If no consecutive sync found, fallback to startSearch
-        return startSearch
+        // Fallback to startSearch if no sync found
+        return safeStart
     }
 
     /**
@@ -196,12 +214,10 @@ object Mp3Id3Engine {
         if (layerId == 0) return -1
 
         // 4. Bitrate index (bits 16-19):
-        // 0000 = free, 1111 = bad
         val bitrateIdx = (b2 shr 4) and 0x0F
         if (bitrateIdx == 0 || bitrateIdx == 15) return -1
 
         // 5. Sampling rate index (bits 20-21):
-        // 11 = reserved
         val sampleRateIdx = (b2 shr 2) and 0x03
         if (sampleRateIdx == 3) return -1
 
@@ -276,36 +292,6 @@ object Mp3Id3Engine {
         }
     }
 
-    private fun trimTrailingNullBytes(raf: RandomAccessFile, audioStart: Long, currentEnd: Long): Long {
-        var end = currentEnd
-        val buffer = ByteArray(256)
-        while (end > audioStart + 256) {
-            val toRead = minOf(buffer.size.toLong(), end - audioStart).toInt()
-            val checkOffset = end - toRead
-            raf.seek(checkOffset)
-            val read = raf.read(buffer, 0, toRead)
-            if (read <= 0) break
-
-            var allZero = true
-            var nonZeroIdx = -1
-            for (i in read - 1 downTo 0) {
-                if (buffer[i] != 0.toByte()) {
-                    allZero = false
-                    nonZeroIdx = i
-                    break
-                }
-            }
-
-            if (allZero) {
-                end -= read
-            } else {
-                end = checkOffset + nonZeroIdx + 1
-                break
-            }
-        }
-        return end
-    }
-
     /**
      * Extract existing metadata by combining direct ID3 parsing and MediaMetadataRetriever.
      */
@@ -336,29 +322,43 @@ object Mp3Id3Engine {
             e.printStackTrace()
         }
 
-        // 2. MediaMetadataRetriever fallback/supplement
+        // 2. MediaMetadataRetriever fallback for duration and missing fields
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(file.absolutePath)
             if (title.isBlank()) {
-                title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.let {
+                    if (it.isNotBlank()) title = it
+                }
             }
             if (artist.isBlank()) {
-                artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.let {
+                    if (it.isNotBlank()) artist = it
+                }
             }
             if (album.isBlank()) {
-                album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.let {
+                    if (it.isNotBlank()) album = it
+                }
             }
             if (genre.isBlank()) {
-                genre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)?.let {
+                    if (it.isNotBlank()) genre = it
+                }
             }
             if (year.isBlank()) {
-                year = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)?.let {
+                    if (it.isNotBlank()) year = it
+                }
             }
             if (trackNumber.isBlank()) {
-                trackNumber = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER) ?: ""
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)?.let {
+                    if (it.isNotBlank()) trackNumber = it
+                }
             }
-            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let {
+                durationMs = it
+            }
             if (coverBytes == null) {
                 coverBytes = retriever.embeddedPicture
             }
@@ -442,14 +442,12 @@ object Mp3Id3Engine {
 
                 val frameId = String(tagBytes, offset, 4, StandardCharsets.US_ASCII)
                 val frameSize = if (version == 4) {
-                    // ID3v2.4 uses syncsafe integer for frame size
                     val f0 = tagBytes[offset + 4].toInt() and 0x7F
                     val f1 = tagBytes[offset + 5].toInt() and 0x7F
                     val f2 = tagBytes[offset + 6].toInt() and 0x7F
                     val f3 = tagBytes[offset + 7].toInt() and 0x7F
                     (f0 shl 21) or (f1 shl 14) or (f2 shl 7) or f3
                 } else {
-                    // ID3v2.3 uses standard big-endian 32-bit int
                     val b0 = tagBytes[offset + 4].toInt() and 0xFF
                     val b1 = tagBytes[offset + 5].toInt() and 0xFF
                     val b2 = tagBytes[offset + 6].toInt() and 0xFF
@@ -494,10 +492,7 @@ object Mp3Id3Engine {
         return try {
             when (encoding) {
                 0 -> String(textBytes, StandardCharsets.ISO_8859_1).trimEnd('\u0000', ' ')
-                1 -> {
-                    // UTF-16 with BOM
-                    String(textBytes, StandardCharsets.UTF_16).trimEnd('\u0000', ' ')
-                }
+                1 -> String(textBytes, StandardCharsets.UTF_16).trimEnd('\u0000', ' ')
                 2 -> String(textBytes, StandardCharsets.UTF_16BE).trimEnd('\u0000', ' ')
                 3 -> String(textBytes, StandardCharsets.UTF_8).trimEnd('\u0000', ' ')
                 else -> String(textBytes, StandardCharsets.ISO_8859_1).trimEnd('\u0000', ' ')
@@ -514,25 +509,21 @@ object Mp3Id3Engine {
         ptr++
 
         // Read MIME type (null-terminated string)
-        val mimeStart = ptr
         while (ptr < offset + length && data[ptr] != 0.toByte()) {
             ptr++
         }
         ptr++ // skip null
 
         if (ptr >= offset + length) return null
-        val pictureType = data[ptr].toInt() and 0xFF
-        ptr++
+        ptr++ // skip picture type
 
         // Read description (null-terminated string according to encoding)
         if (encoding == 1 || encoding == 2) {
-            // UTF-16: 2 null bytes (0x00, 0x00)
             while (ptr + 1 < offset + length && !(data[ptr] == 0.toByte() && data[ptr + 1] == 0.toByte())) {
                 ptr += 2
             }
             ptr += 2
         } else {
-            // ISO-8859-1 or UTF-8: 1 null byte
             while (ptr < offset + length && data[ptr] != 0.toByte()) {
                 ptr++
             }
@@ -578,7 +569,6 @@ object Mp3Id3Engine {
     fun buildId3v23Tag(metadata: Mp3Metadata): ByteArray {
         val framesOut = ByteArrayOutputStream()
 
-        // Write Text Frames (TIT2, TPE1, TALB, TYER, TCON, TRCK)
         if (metadata.title.isNotBlank()) {
             writeTextFrame(framesOut, "TIT2", metadata.title.trim())
         }
@@ -638,36 +628,28 @@ object Mp3Id3Engine {
         val isAscii = text.all { it.code in 32..126 || it == '\n' || it == '\r' || it == '\t' }
 
         if (isAscii) {
-            // Encoding 0x00 = ISO-8859-1 (Most universally compatible with stock Android & car players)
             payloadOut.write(0x00)
             payloadOut.write(text.toByteArray(StandardCharsets.ISO_8859_1))
         } else {
-            // Encoding 0x01 = Unicode UTF-16 with BOM
             payloadOut.write(0x01)
-            // Little Endian BOM
             payloadOut.write(0xFF)
             payloadOut.write(0xFE)
-            // UTF-16LE text bytes
             payloadOut.write(text.toByteArray(StandardCharsets.UTF_16LE))
         }
 
         val payload = payloadOut.toByteArray()
 
-        // 4-byte Frame ID
         out.write(frameId.toByteArray(StandardCharsets.US_ASCII))
 
-        // 4-byte Frame Size (standard big-endian 32-bit int in ID3v2.3)
         val size = payload.size
         out.write((size shr 24) and 0xFF)
         out.write((size shr 16) and 0xFF)
         out.write((size shr 8) and 0xFF)
         out.write(size and 0xFF)
 
-        // 2-byte Flags (0x00, 0x00)
         out.write(0x00)
         out.write(0x00)
 
-        // Payload
         out.write(payload)
     }
 
@@ -676,40 +658,30 @@ object Mp3Id3Engine {
      */
     private fun writeApicFrame(out: ByteArrayOutputStream, imageBytes: ByteArray, mimeType: String) {
         val payloadOut = ByteArrayOutputStream()
-        // Text encoding: 0x00 = ISO-8859-1 for MIME and description
-        payloadOut.write(0x00)
+        payloadOut.write(0x00) // ISO-8859-1
 
-        // MIME type + 0x00 null terminator
         val cleanMime = if (mimeType.contains("png", ignoreCase = true)) "image/png" else "image/jpeg"
         payloadOut.write(cleanMime.toByteArray(StandardCharsets.ISO_8859_1))
-        payloadOut.write(0x00)
+        payloadOut.write(0x00) // null terminator for MIME
 
-        // Picture type: 0x03 = Cover (front)
-        payloadOut.write(0x03)
+        payloadOut.write(0x03) // 0x03 = Cover (front)
+        payloadOut.write(0x00) // null terminator for empty description
 
-        // Description + 0x00 null terminator (empty description)
-        payloadOut.write(0x00)
-
-        // Binary picture data
         payloadOut.write(imageBytes)
 
         val payload = payloadOut.toByteArray()
 
-        // 4-byte Frame ID "APIC"
         out.write("APIC".toByteArray(StandardCharsets.US_ASCII))
 
-        // 4-byte Frame Size (standard big-endian int in ID3v2.3)
         val size = payload.size
         out.write((size shr 24) and 0xFF)
         out.write((size shr 16) and 0xFF)
         out.write((size shr 8) and 0xFF)
         out.write(size and 0xFF)
 
-        // 2-byte Flags (0x00, 0x00)
         out.write(0x00)
         out.write(0x00)
 
-        // Payload
         out.write(payload)
     }
 
@@ -718,26 +690,17 @@ object Mp3Id3Engine {
      */
     fun buildId3v1Tag(metadata: Mp3Metadata): ByteArray {
         val tag = ByteArray(128)
-        // 0..2: "TAG"
         tag[0] = 'T'.code.toByte()
         tag[1] = 'A'.code.toByte()
         tag[2] = 'G'.code.toByte()
 
-        // 3..32: Title (30 bytes)
         writeIsoString(tag, 3, 30, metadata.title)
-        // 33..62: Artist (30 bytes)
         writeIsoString(tag, 33, 30, metadata.artist)
-        // 63..92: Album (30 bytes)
         writeIsoString(tag, 63, 30, metadata.album)
-        // 93..96: Year (4 bytes)
         writeIsoString(tag, 93, 4, metadata.year)
-        // 97..124: Comment (28 bytes)
         writeIsoString(tag, 97, 28, "LishEdInfo")
-        // 125: 0x00 (Track marker)
         tag[125] = 0x00
-        // 126: Track number
         tag[126] = (metadata.trackNumber.toIntOrNull() ?: 0).coerceIn(0, 255).toByte()
-        // 127: Genre (255 = None)
         tag[127] = 255.toByte()
 
         return tag

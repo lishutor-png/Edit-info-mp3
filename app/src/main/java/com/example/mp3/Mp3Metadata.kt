@@ -3,7 +3,7 @@ package com.example.mp3
 import android.graphics.Bitmap
 
 /**
- * Data model for MP3 song information.
+ * Encapsulates MP3 metadata tags and cover artwork.
  */
 data class Mp3Metadata(
     val title: String = "",
@@ -24,6 +24,7 @@ data class Mp3Metadata(
         if (javaClass != other?.javaClass) return false
 
         other as Mp3Metadata
+
         if (title != other.title) return false
         if (artist != other.artist) return false
         if (album != other.album) return false

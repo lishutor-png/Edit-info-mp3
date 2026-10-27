@@ -1,8 +1,24 @@
-<?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/ic_launcher_foreground_1792917507649"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Center disc / vinyl turntable record with musical note -->
+    <path
+        android:fillColor="#3F51B5"
+        android:pathData="M54,54m-38,0a38,38 0 1,1 76,0a38,38 0 1,1 -76,0" />
+    <path
+        android:fillColor="#5C6BC0"
+        android:pathData="M54,54m-26,0a26,26 0 1,1 52,0a26,26 0 1,1 -52,0" />
+    <path
+        android:fillColor="#7986CB"
+        android:pathData="M54,54m-14,0a14,14 0 1,1 28,0a14,14 0 1,1 -28,0" />
+    <!-- Music note -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M58,40v18.5a5.5,5.5 0 1,1 -4,-5.2V44l12,-3v6h-8z" />
+    <!-- Edit pencil icon overlay -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M66,66l-4,12 12,-4 14,-14 -8,-8z" />
+</vector>

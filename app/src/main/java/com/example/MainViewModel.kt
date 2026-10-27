@@ -2,7 +2,6 @@ package com.example
 
 import android.app.Application
 import android.content.ContentValues
-import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaPlayer
 import android.media.MediaScannerConnection
@@ -16,7 +15,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.mp3.ImageUtils
 import com.example.mp3.Mp3Id3Engine
 import com.example.mp3.Mp3Metadata
-import com.example.mp3.SampleMp3Helper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -30,97 +28,103 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
-data class UiState(
-    val metadata: Mp3Metadata? = null,
-    val sourceFile: File? = null,
-    val isSampleMode: Boolean = true,
+data class MainUiState(
     val isLoading: Boolean = false,
     val isExporting: Boolean = false,
+    val statusMessage: String? = null,
+    val sourceFile: File? = null,
+    val metadata: Mp3Metadata? = null,
     val isPlaying: Boolean = false,
     val currentPositionMs: Int = 0,
-    val totalDurationMs: Int = 0,
-    val statusMessage: String? = null,
+    val durationMs: Int = 0,
     val exportedSuccessUri: Uri? = null,
-    val exportedFileName: String? = null,
+    val exportedFileName: String = "",
     val showExportSuccessDialog: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(UiState())
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    private val _uiState = MutableStateFlow(MainUiState())
+    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
     private var mediaPlayer: MediaPlayer? = null
-    private var progressJob: Job? = null
+    private var playbackTrackerJob: Job? = null
 
-    init {
-        // Auto-load sample song on first launch for instant testing
-        loadSampleMp3()
+    override fun onCleared() {
+        super.onCleared()
+        stopPlaybackTracker()
+        mediaPlayer?.release()
+        mediaPlayer = null
     }
 
-    fun loadSampleMp3() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, statusMessage = "Memuat lagu contoh...") }
-            try {
-                val file = withContext(Dispatchers.IO) {
-                    SampleMp3Helper.createSampleMp3File(getApplication())
-                }
-                loadFromFile(file, isSample = true)
-            } catch (e: Exception) {
-                e.printStackTrace()
-                _uiState.update { it.copy(isLoading = false, statusMessage = "Gagal memuat lagu contoh: ${e.localizedMessage}") }
-            }
-        }
-    }
-
-    fun loadMp3FromUri(uri: Uri) {
+    fun loadAudioFromUri(uri: Uri) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Membaca file MP3...") }
             try {
                 val context = getApplication<Application>()
-                val resolvedName = getFileNameFromUri(context, uri) ?: "audio_${System.currentTimeMillis()}.mp3"
-                val tempFile = File(context.cacheDir, "current_editing.mp3")
+                val tempInput = File(context.cacheDir, "imported_source.mp3")
 
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(tempFile).use { output ->
+                        FileOutputStream(tempInput).use { output ->
                             input.copyTo(output)
                         }
                     }
                 }
 
-                loadFromFile(tempFile, isSample = false, resolvedName = resolvedName)
+                if (!tempInput.exists() || tempInput.length() == 0L) {
+                    throw IllegalStateException("File tidak dapat dibaca atau kosong.")
+                }
+
+                val detectedMeta = withContext(Dispatchers.IO) {
+                    Mp3Id3Engine.extractMetadata(context, tempInput)
+                }
+
+                // If title is missing, try reading from ContentResolver displayName
+                val finalMeta = if (detectedMeta.title.isBlank() || detectedMeta.title == "Lagu") {
+                    val resolvedName = getFileNameFromUri(context, uri) ?: tempInput.name
+                    val cleanTitle = resolvedName.substringBeforeLast(".")
+                    detectedMeta.copy(title = cleanTitle, fileName = resolvedName)
+                } else {
+                    detectedMeta
+                }
+
+                prepareAudioPlayer(tempInput)
+
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        sourceFile = tempInput,
+                        metadata = finalMeta,
+                        statusMessage = "File berhasil dimuat."
+                    )
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _uiState.update { it.copy(isLoading = false, statusMessage = "Gagal membuka file: ${e.localizedMessage}") }
+                _uiState.update {
+                    it.copy(isLoading = false, statusMessage = "Gagal membaca audio: ${e.localizedMessage}")
+                }
             }
         }
     }
 
-    private suspend fun loadFromFile(file: File, isSample: Boolean = false, resolvedName: String? = null) {
-        stopAudio()
-        val context = getApplication<Application>()
-        val meta = withContext(Dispatchers.IO) {
-            val extracted = Mp3Id3Engine.extractMetadata(context, file)
-            if (resolvedName != null) {
-                extracted.copy(fileName = resolvedName)
-            } else {
-                extracted
+    private fun getFileNameFromUri(context: Application, uri: Uri): String? {
+        var name: String? = null
+        try {
+            val cursor = context.contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) {
+                        name = it.getString(index)
+                    }
+                }
             }
-        }
-
-        prepareAudioPlayer(file)
-
-        _uiState.update {
-            it.copy(
-                metadata = meta,
-                sourceFile = file,
-                isSampleMode = isSample,
-                isLoading = false,
-                statusMessage = if (isSample) "Lagu contoh siap diedit." else "File MP3 Anda berhasil dimuat."
-            )
-        }
+        } catch (ignored: Exception) {}
+        return name
     }
+
+    // --- Metadata Edit Methods ---
 
     fun updateTitle(title: String) {
         _uiState.update { state ->
@@ -185,7 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateCoverImage(bitmap: Bitmap) {
         viewModelScope.launch(Dispatchers.IO) {
-            val bytes = ImageUtils.compressBitmapToCoverBytes(bitmap, quality = 88, maxDimension = 800)
+            val bytes = ImageUtils.compressBitmapToCoverBytes(bitmap, quality = 80, maxDimension = 600)
             _uiState.update { state ->
                 val meta = state.metadata?.copy(
                     coverImageBytes = bytes,
@@ -229,10 +233,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val context = getApplication<Application>()
                 val targetTitle = meta.title.ifBlank { "Lagu" }.trim()
                 val targetArtist = meta.artist.ifBlank { "Artis" }.trim()
+                val targetAlbum = meta.album.ifBlank { targetTitle }.trim()
                 val safeFileName = "${targetTitle} - ${targetArtist}.mp3"
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
-                // Always write to a brand-new temporary file to prevent self-truncation
                 val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.mp3")
                 val previewFile = File(context.cacheDir, "current_editing.mp3")
 
@@ -243,7 +247,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        // Delete previous duplicate in MediaStore if any
                         try {
                             val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ? AND ${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
                             val selectionArgs = arrayOf(safeFileName, "%LishEdInfo%")
@@ -254,7 +257,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
                             put(MediaStore.Audio.Media.TITLE, targetTitle)
                             put(MediaStore.Audio.Media.ARTIST, targetArtist)
-                            put(MediaStore.Audio.Media.ALBUM, meta.album.ifBlank { "LishEdInfo Album" })
+                            put(MediaStore.Audio.Media.ALBUM, targetAlbum)
                             put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
                             put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LishEdInfo/")
                             put(MediaStore.Audio.Media.IS_PENDING, 1)
@@ -266,12 +269,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 tempFile.inputStream().use { input ->
                                     input.copyTo(out)
                                 }
+                                out.flush()
                             }
                             contentValues.clear()
                             contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                            contentValues.put(MediaStore.Audio.Media.SIZE, tempFile.length())
+                            if (meta.durationMs > 0) {
+                                contentValues.put(MediaStore.Audio.Media.DURATION, meta.durationMs)
+                            }
                             context.contentResolver.update(uri, contentValues, null, null)
 
-                            // Trigger MediaScanner for immediate stock music player indexing
                             var physicalPath: String? = null
                             try {
                                 val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null)
@@ -283,7 +290,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (physicalPath.isNullOrBlank()) {
                                 physicalPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "LishEdInfo/$safeFileName").absolutePath
                             }
-                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg")) { _, _ -> }
+                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg"), null)
                         }
                         uri
                     } else {
@@ -306,7 +313,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 if (resultUri != null) {
-                    // Update in-app player with clean preview file
                     tempFile.copyTo(previewFile, overwrite = true)
                     tempFile.delete()
                     prepareAudioPlayer(previewFile)
@@ -356,6 +362,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         tempFile.inputStream().use { input ->
                             input.copyTo(out)
                         }
+                        out.flush()
                     }
                 }
 
@@ -401,11 +408,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 prepare()
                 setOnCompletionListener {
                     _uiState.update { s -> s.copy(isPlaying = false, currentPositionMs = 0) }
-                    stopProgressTracking()
                 }
             }
             val dur = mediaPlayer?.duration ?: 0
-            _uiState.update { it.copy(totalDurationMs = dur, currentPositionMs = 0, isPlaying = false) }
+            _uiState.update { it.copy(isPlaying = false, currentPositionMs = 0, durationMs = dur) }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -413,75 +419,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val player = mediaPlayer ?: return
-        if (player.isPlaying) {
-            player.pause()
-            stopProgressTracking()
-            _uiState.update { it.copy(isPlaying = false) }
-        } else {
-            player.start()
-            startProgressTracking()
-            _uiState.update { it.copy(isPlaying = true) }
+        try {
+            if (player.isPlaying) {
+                player.pause()
+                stopPlaybackTracker()
+                _uiState.update { it.copy(isPlaying = false) }
+            } else {
+                player.start()
+                startPlaybackTracker()
+                _uiState.update { it.copy(isPlaying = true) }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
     fun seekTo(positionMs: Int) {
-        mediaPlayer?.seekTo(positionMs)
-        _uiState.update { it.copy(currentPositionMs = positionMs) }
-    }
-
-    private fun startProgressTracking() {
-        progressJob?.cancel()
-        progressJob = viewModelScope.launch {
-            while (isActive) {
-                mediaPlayer?.let { player ->
-                    if (player.isPlaying) {
-                        _uiState.update { it.copy(currentPositionMs = player.currentPosition) }
-                    }
-                }
-                delay(200)
-            }
-        }
-    }
-
-    private fun stopProgressTracking() {
-        progressJob?.cancel()
-        progressJob = null
-    }
-
-    private fun stopAudio() {
-        stopProgressTracking()
+        val player = mediaPlayer ?: return
         try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-        } catch (ignored: Exception) {}
-        mediaPlayer = null
-        _uiState.update { it.copy(isPlaying = false, currentPositionMs = 0) }
+            player.seekTo(positionMs)
+            _uiState.update { it.copy(currentPositionMs = positionMs) }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    private fun getFileNameFromUri(context: Context, uri: Uri): String? {
-        var name: String? = null
-        if (uri.scheme == "content") {
-            val cursor = context.contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index >= 0) {
-                        name = it.getString(index)
-                    }
-                }
+    private fun startPlaybackTracker() {
+        stopPlaybackTracker()
+        playbackTrackerJob = viewModelScope.launch {
+            while (isActive) {
+                val current = mediaPlayer?.currentPosition ?: 0
+                _uiState.update { it.copy(currentPositionMs = current) }
+                delay(300)
             }
         }
-        if (name == null) {
-            name = uri.path?.let { p ->
-                val cut = p.lastIndexOf('/')
-                if (cut != -1) p.substring(cut + 1) else p
-            }
-        }
-        return name
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        stopAudio()
+    private fun stopPlaybackTracker() {
+        playbackTrackerJob?.cancel()
+        playbackTrackerJob = null
     }
 }

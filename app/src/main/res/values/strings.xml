@@ -1,14 +1,3 @@
 <resources>
-    <string name="app_name">LishEdInfo</string>
-    <string name="title_app_tagline">Editor Tag MP3 Ringan &amp; Aman</string>
-    <string name="action_select_mp3">Pilih File Lagu MP3</string>
-    <string name="action_change_cover">Ganti Sampul</string>
-    <string name="action_remove_cover">Hapus Sampul</string>
-    <string name="action_save_export">Simpan &amp; Ekspor MP3</string>
-    <string name="field_title">Judul Lagu</string>
-    <string name="field_artist">Artis</string>
-    <string name="field_album">Album</string>
-    <string name="field_genre">Genre (Opsional)</string>
-    <string name="field_year">Tahun (Opsional)</string>
-    <string name="field_track">No. Track (Opsional)</string>
+    <string name="app_name">LishEdInfo MP3</string>
 </resources>

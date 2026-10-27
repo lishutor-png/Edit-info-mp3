@@ -5,31 +5,38 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import java.io.ByteArrayOutputStream
-import kotlin.math.max
-import kotlin.math.min
 
 object ImageUtils {
 
     /**
-     * Reads image bytes from Uri in a single operation to prevent transient stream closure errors,
-     * then decodes into an optimized, memory-safe Bitmap.
+     * Decode an image from Uri and scale it down to a safe dimension for ID3 embedding.
      */
-    fun decodeSampledBitmapFromUri(context: Context, uri: Uri, reqWidth: Int = 1000, reqHeight: Int = 1000): Bitmap? {
+    fun decodeUriToBitmap(context: Context, uri: Uri, maxDimension: Int = 600): Bitmap? {
         return try {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes == null || bytes.isEmpty()) return null
-
-            val options = BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, boundsOptions)
             }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 
-            if (options.outWidth <= 0 || options.outHeight <= 0) return null
+            var inSampleSize = 1
+            if (boundsOptions.outHeight > maxDimension || boundsOptions.outWidth > maxDimension) {
+                val halfHeight = boundsOptions.outHeight / 2
+                val halfWidth = boundsOptions.outWidth / 2
+                while ((halfHeight / inSampleSize) >= maxDimension && (halfWidth / inSampleSize) >= maxDimension) {
+                    inSampleSize *= 2
+                }
+            }
 
-            options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
-            options.inJustDecodeBounds = false
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565 // Conserves memory
+            }
 
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            val decoded = context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOptions)
+            } ?: return null
+
+            scaleBitmapToMax(decoded, maxDimension)
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -37,26 +44,40 @@ object ImageUtils {
     }
 
     /**
-     * Compress bitmap into clean, high-quality JPEG byte array for ID3 APIC frame.
+     * Scale bitmap so that neither width nor height exceeds [maxDimension].
      */
-    fun compressBitmapToCoverBytes(bitmap: Bitmap, quality: Int = 88, maxDimension: Int = 1000): ByteArray {
-        val scaled = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
-            val ratio = min(maxDimension.toFloat() / bitmap.width, maxDimension.toFloat() / bitmap.height)
-            val newW = max(1, (bitmap.width * ratio).toInt())
-            val newH = max(1, (bitmap.height * ratio).toInt())
-            Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+    fun scaleBitmapToMax(source: Bitmap, maxDimension: Int): Bitmap {
+        val width = source.width
+        val height = source.height
+        if (width <= maxDimension && height <= maxDimension) return source
+
+        val ratio = width.toFloat() / height.toFloat()
+        val targetWidth: Int
+        val targetHeight: Int
+        if (width > height) {
+            targetWidth = maxDimension
+            targetHeight = (maxDimension / ratio).toInt().coerceAtLeast(1)
         } else {
-            bitmap
+            targetHeight = maxDimension
+            targetWidth = (maxDimension * ratio).toInt().coerceAtLeast(1)
         }
 
-        val out = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (scaled != bitmap && !scaled.isRecycled) {
-            scaled.recycle()
-        }
-        return out.toByteArray()
+        return Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
     }
 
+    /**
+     * Compress bitmap to JPEG byte array optimized for ID3 APIC frame.
+     */
+    fun compressBitmapToCoverBytes(bitmap: Bitmap, quality: Int = 80, maxDimension: Int = 600): ByteArray {
+        val scaled = scaleBitmapToMax(bitmap, maxDimension)
+        val stream = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+        return stream.toByteArray()
+    }
+
+    /**
+     * Decode byte array to Bitmap.
+     */
     fun bytesToBitmap(bytes: ByteArray?): Bitmap? {
         if (bytes == null || bytes.isEmpty()) return null
         return try {
@@ -64,20 +85,5 @@ object ImageUtils {
         } catch (e: Exception) {
             null
         }
-    }
-
-    private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
-        val height = options.outHeight
-        val width = options.outWidth
-        var inSampleSize = 1
-
-        if (height > reqHeight || width > reqWidth) {
-            val halfHeight = height / 2
-            val halfWidth = width / 2
-            while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
-                inSampleSize *= 2
-            }
-        }
-        return max(1, inSampleSize)
     }
 }
