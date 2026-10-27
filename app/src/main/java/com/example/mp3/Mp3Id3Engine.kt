@@ -149,9 +149,13 @@ object Mp3Id3Engine {
 
             // Construct clean standard ID3v2.3 tag
             val id3v2 = ID3v23Tag()
-            if (newMetadata.title.isNotBlank()) id3v2.title = newMetadata.title.trim()
-            if (newMetadata.artist.isNotBlank()) id3v2.artist = newMetadata.artist.trim()
-            if (newMetadata.album.isNotBlank()) id3v2.album = newMetadata.album.trim()
+            val effectiveTitle = newMetadata.title.ifBlank { "Lagu" }.trim()
+            val effectiveArtist = newMetadata.artist.ifBlank { "Artis" }.trim()
+            val effectiveAlbum = newMetadata.album.ifBlank { effectiveTitle }.trim()
+
+            id3v2.title = effectiveTitle
+            id3v2.artist = effectiveArtist
+            id3v2.album = effectiveAlbum
             if (newMetadata.year.isNotBlank()) id3v2.year = newMetadata.year.trim()
             if (newMetadata.trackNumber.isNotBlank()) id3v2.track = newMetadata.trackNumber.trim()
             if (newMetadata.genre.isNotBlank()) {
@@ -160,11 +164,15 @@ object Mp3Id3Engine {
                 } catch (ignored: Exception) {}
             }
 
-            // Set APIC cover art
+            // Set APIC cover art (using Picture Type 3 = Front Cover for Android Stagefright compatibility)
             val cover = newMetadata.coverImageBytes
             if (cover != null && cover.isNotEmpty()) {
                 val mime = if (newMetadata.coverMimeType.contains("png", true)) "image/png" else "image/jpeg"
-                id3v2.setAlbumImage(cover, mime)
+                try {
+                    id3v2.setAlbumImage(cover, mime, 3.toByte(), "Cover")
+                } catch (e: Exception) {
+                    id3v2.setAlbumImage(cover, mime)
+                }
             } else {
                 id3v2.clearAlbumImage()
             }
@@ -173,9 +181,9 @@ object Mp3Id3Engine {
 
             // Also include ID3v1 tag for legacy players
             val id3v1 = ID3v1Tag()
-            id3v1.title = newMetadata.title.trim().take(30)
-            id3v1.artist = newMetadata.artist.trim().take(30)
-            id3v1.album = newMetadata.album.trim().take(30)
+            id3v1.title = effectiveTitle.take(30)
+            id3v1.artist = effectiveArtist.take(30)
+            id3v1.album = effectiveAlbum.take(30)
             id3v1.year = newMetadata.year.trim().take(4)
             id3v1.track = newMetadata.trackNumber.trim().take(4)
             mp3file.id3v1Tag = id3v1
@@ -404,9 +412,13 @@ object Mp3Id3Engine {
     fun buildId3v23Tag(metadata: Mp3Metadata): ByteArray {
         val framesOut = ByteArrayOutputStream()
 
-        if (metadata.title.isNotBlank()) writeTextFrame(framesOut, "TIT2", metadata.title.trim())
-        if (metadata.artist.isNotBlank()) writeTextFrame(framesOut, "TPE1", metadata.artist.trim())
-        if (metadata.album.isNotBlank()) writeTextFrame(framesOut, "TALB", metadata.album.trim())
+        val title = metadata.title.ifBlank { "Lagu" }.trim()
+        val artist = metadata.artist.ifBlank { "Artis" }.trim()
+        val album = metadata.album.ifBlank { title }.trim()
+
+        writeTextFrame(framesOut, "TIT2", title)
+        writeTextFrame(framesOut, "TPE1", artist)
+        writeTextFrame(framesOut, "TALB", album)
         if (metadata.year.isNotBlank()) writeTextFrame(framesOut, "TYER", metadata.year.trim())
         if (metadata.genre.isNotBlank()) writeTextFrame(framesOut, "TCON", metadata.genre.trim())
         if (metadata.trackNumber.isNotBlank()) writeTextFrame(framesOut, "TRCK", metadata.trackNumber.trim())

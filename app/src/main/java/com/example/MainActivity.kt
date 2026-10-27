@@ -51,7 +51,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -398,7 +402,7 @@ fun CoverImageSection(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Ketuk untuk Ganti Sampul",
+                        text = "Ketuk untuk Tambah Sampul",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -416,7 +420,7 @@ fun CoverImageSection(
             ) {
                 Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Ganti Cover", fontSize = 12.sp)
+                Text(if (coverBitmap != null) "Ganti Cover" else "Tambah Cover", fontSize = 12.sp)
             }
             if (coverBitmap != null) {
                 OutlinedButton(
@@ -594,6 +598,52 @@ fun MetadataEditorSection(
                         .testTag("input_year"),
                     shape = RoundedCornerShape(12.dp)
                 )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Quick Genre selection chips
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "Pilih Genre Cepat (Tinggal Klik):",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val popularGenres = listOf(
+                        "Pop", "Dangdut", "Rock", "Akustik", "R&B", "Jazz",
+                        "Hip Hop", "Indie", "Religi", "K-Pop", "EDM", "Metal",
+                        "Campursari", "Blues", "Klasik", "Lo-Fi", "Reggae", "Folk"
+                    )
+                    items(popularGenres) { genreName ->
+                        val isSelected = metadata?.genre.equals(genreName, ignoreCase = true)
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = {
+                                if (isSelected) onGenreChange("") else onGenreChange(genreName)
+                            },
+                            label = { Text(genreName, fontSize = 12.sp) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.testTag("chip_genre_$genreName")
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))

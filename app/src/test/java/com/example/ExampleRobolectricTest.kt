@@ -84,4 +84,59 @@ class ExampleRobolectricTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun testAddCoverToCoverlessMp3() {
+        val tempDir = File.createTempFile("test_cover", "dir")
+        tempDir.delete()
+        tempDir.mkdirs()
+
+        try {
+            val sourceMp3 = File(tempDir, "no_cover.mp3")
+            // Create dummy MP3 consisting of 10 valid MPEG frames
+            val frameHeader = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x64.toByte())
+            FileOutputStream(sourceMp3).use { fos ->
+                repeat(10) {
+                    fos.write(frameHeader)
+                    fos.write(ByteArray(413))
+                }
+            }
+
+            // Create a small dummy JPEG header + payload for testing cover
+            val fakeJpeg = byteArrayOf(
+                0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(),
+                0x00.toByte(), 0x10.toByte(), 0x4A.toByte(), 0x46.toByte(),
+                0x49.toByte(), 0x46.toByte(), 0x00.toByte(), 0x01.toByte(),
+                0xFF.toByte(), 0xD9.toByte()
+            )
+
+            val meta = Mp3Metadata(
+                title = "New Song",
+                artist = "New Artist",
+                coverImageBytes = fakeJpeg,
+                coverMimeType = "image/jpeg"
+            )
+
+            val exportedFile = File(tempDir, "exported.mp3")
+            FileOutputStream(exportedFile).use { fos ->
+                Mp3Id3Engine.exportMp3(sourceMp3, meta, fos)
+            }
+
+            assertTrue(exportedFile.exists())
+            assertTrue(exportedFile.length() > sourceMp3.length())
+
+            val readMeta = Mp3Id3Engine.extractMetadata(
+                androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                exportedFile
+            )
+
+            assertEquals("New Song", readMeta.title)
+            assertEquals("New Artist", readMeta.artist)
+            assertNotNull("Cover image should not be null!", readMeta.coverImageBytes)
+            assertEquals(fakeJpeg.size, readMeta.coverImageBytes?.size)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }
+
