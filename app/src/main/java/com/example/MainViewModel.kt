@@ -313,8 +313,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             contentValues.clear()
                             contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
                             contentValues.put(MediaStore.Audio.Media.SIZE, tempFile.length())
-                            if (meta.durationMs > 0) {
-                                contentValues.put(MediaStore.Audio.Media.DURATION, meta.durationMs)
+                            val finalDur = if (meta.durationMs > 0) {
+                                meta.durationMs
+                            } else {
+                                try {
+                                    val r = android.media.MediaMetadataRetriever()
+                                    r.setDataSource(tempFile.absolutePath)
+                                    val d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                                    r.release()
+                                    d
+                                } catch (ignored: Exception) { 0L }
+                            }
+                            if (finalDur > 0) {
+                                contentValues.put(MediaStore.Audio.Media.DURATION, finalDur)
                             }
                             context.contentResolver.update(uri, contentValues, null, null)
 

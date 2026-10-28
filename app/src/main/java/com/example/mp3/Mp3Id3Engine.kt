@@ -221,6 +221,29 @@ object Mp3Id3Engine {
                 }
             }
 
+            // Detect and strip APEv2 tag if present (either before ID3v1 or at EOF)
+            if (audioEnd >= 32) {
+                raf.seek(audioEnd - 32)
+                val apeHeader = ByteArray(8)
+                if (raf.read(apeHeader, 0, 8) == 8) {
+                    val str = String(apeHeader, StandardCharsets.US_ASCII)
+                    if (str == "APETAGEX") {
+                        val sizeBytes = ByteArray(4)
+                        raf.seek(audioEnd - 32 + 12)
+                        if (raf.read(sizeBytes, 0, 4) == 4) {
+                            val b0 = sizeBytes[0].toLong() and 0xFF
+                            val b1 = sizeBytes[1].toLong() and 0xFF
+                            val b2 = sizeBytes[2].toLong() and 0xFF
+                            val b3 = sizeBytes[3].toLong() and 0xFF
+                            val apeSize = b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+                            if (apeSize in 32..500000 && audioEnd >= apeSize) {
+                                audioEnd -= apeSize
+                            }
+                        }
+                    }
+                }
+            }
+
             if (audioEnd <= audioStart) {
                 audioEnd = fileLength
             }
@@ -233,25 +256,33 @@ object Mp3Id3Engine {
         val safeStart = startSearch.coerceIn(0L, (fileLength - 4).coerceAtLeast(0L))
         if (fileLength < 4) return safeStart
 
-        // 1. Direct check: Is there already an MPEG sync right at safeStart?
-        val initialBytes = ByteArray(4)
-        raf.seek(safeStart)
-        val readInit = raf.read(initialBytes, 0, 4)
-        if (readInit == 4) {
-            val b0 = initialBytes[0].toInt() and 0xFF
-            val b1 = initialBytes[1].toInt() and 0xFF
-            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
-                val size = getMpegFrameSize(initialBytes, 0, 4)
-                if (size > 0) {
-                    return safeStart
+        // 1. Direct check: Is safeStart ALREADY the beginning of consecutive valid MPEG frames?
+        if (verifyConsecutiveFrames(raf, safeStart, fileLength)) {
+            return safeStart
+        }
+
+        // 2. Skip leading 0x00 or 0xFF padding right after ID3 tag or at start of file
+        var current = safeStart
+        val leadBuffer = ByteArray(minOf(4096, (fileLength - current).toInt()))
+        raf.seek(current)
+        val leadRead = raf.read(leadBuffer)
+        if (leadRead > 0) {
+            var skipCount = 0
+            while (skipCount < leadRead && (leadBuffer[skipCount] == 0x00.toByte())) {
+                skipCount++
+            }
+            if (skipCount > 0 && skipCount < leadRead) {
+                val candidateAfterZeros = current + skipCount
+                if (verifyConsecutiveFrames(raf, candidateAfterZeros, fileLength)) {
+                    return candidateAfterZeros
                 }
             }
         }
 
-        // 2. Scan forward (up to 256KB) to skip any padding or junk bytes
-        val maxSearch = minOf(safeStart + 262144L, (fileLength - 4).coerceAtLeast(0L))
+        // 3. Scan forward up to 64KB, requiring MULTI-FRAME confirmation (prevents false sync inside audio payload)
+        val maxSearch = minOf(safeStart + 65536L, (fileLength - 4).coerceAtLeast(0L))
         var searchOffset = safeStart
-        val bufferSize = 16384
+        val bufferSize = 8192
         val buffer = ByteArray(bufferSize + 4)
 
         while (searchOffset < maxSearch) {
@@ -266,16 +297,82 @@ object Mp3Id3Engine {
                 val b1 = buffer[i + 1].toInt() and 0xFF
 
                 if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
-                    val frameSize = getMpegFrameSize(buffer, i, read)
-                    if (frameSize > 0) {
-                        return searchOffset + i
+                    val candidatePos = searchOffset + i
+                    if (verifyConsecutiveFrames(raf, candidatePos, fileLength)) {
+                        return candidatePos
                     }
                 }
             }
             searchOffset += (read - 3)
         }
 
+        // Fallback: If no multi-frame sequence confirmed, trust safeStart
         return safeStart
+    }
+
+    /**
+     * Verifies that candidateOffset is the start of a real MPEG stream by verifying that
+     * candidate frame and the consecutive following frame have matching MPEG version and sample rate.
+     */
+    private fun verifyConsecutiveFrames(raf: RandomAccessFile, candidateOffset: Long, fileLength: Long): Boolean {
+        if (candidateOffset + 4 > fileLength) return false
+
+        val header1 = ByteArray(4)
+        raf.seek(candidateOffset)
+        if (raf.read(header1, 0, 4) < 4) return false
+
+        val size1 = getMpegFrameSize(header1, 0, 4)
+        if (size1 <= 0) return false
+
+        // Check if this frame has a Xing / Info header (VBR container header)
+        if (hasXingHeader(raf, candidateOffset, fileLength)) {
+            return true
+        }
+
+        val nextOffset = candidateOffset + size1
+        if (nextOffset >= fileLength) {
+            // Reached exact end of file on a valid frame
+            return true
+        }
+
+        if (nextOffset + 4 > fileLength) {
+            return false
+        }
+
+        val header2 = ByteArray(4)
+        raf.seek(nextOffset)
+        if (raf.read(header2, 0, 4) < 4) return false
+
+        val size2 = getMpegFrameSize(header2, 0, 4)
+        if (size2 <= 0) return false
+
+        // Verify version and sample rate match between consecutive frames
+        val v1 = (header1[1].toInt() shr 3) and 0x03
+        val v2 = (header2[1].toInt() shr 3) and 0x03
+        val l1 = (header1[1].toInt() shr 1) and 0x03
+        val l2 = (header2[1].toInt() shr 1) and 0x03
+        val sr1 = (header1[2].toInt() shr 2) and 0x03
+        val sr2 = (header2[2].toInt() shr 2) and 0x03
+
+        return (v1 == v2 && l1 == l2 && sr1 == sr2)
+    }
+
+    private fun hasXingHeader(raf: RandomAccessFile, frameOffset: Long, fileLength: Long): Boolean {
+        // Xing / Info signature is located at frameOffset + 36 (for MPEG1 stereo) or + 21 (MPEG1 mono / MPEG2 stereo)
+        for (offset in intArrayOf(36, 21, 13)) {
+            val target = frameOffset + offset
+            if (target + 4 <= fileLength) {
+                raf.seek(target)
+                val sig = ByteArray(4)
+                if (raf.read(sig, 0, 4) == 4) {
+                    val str = String(sig, StandardCharsets.US_ASCII)
+                    if (str == "Xing" || str == "Info" || str == "VBRI") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     fun getMpegFrameSize(buffer: ByteArray, offset: Int, bufferLen: Int): Int {
@@ -286,14 +383,14 @@ object Mp3Id3Engine {
 
         if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return -1
         val versionId = (b1 shr 3) and 0x03
-        if (versionId == 1) return -1
+        if (versionId == 1) return -1 // Reserved version
         val layerId = (b1 shr 1) and 0x03
-        if (layerId == 0) return -1
+        if (layerId == 0) return -1 // Reserved layer
 
         val bitrateIdx = (b2 shr 4) and 0x0F
-        if (bitrateIdx == 0 || bitrateIdx == 15) return -1
+        if (bitrateIdx == 15) return -1 // Bad bitrate
         val sampleRateIdx = (b2 shr 2) and 0x03
-        if (sampleRateIdx == 3) return -1
+        if (sampleRateIdx == 3) return -1 // Reserved sample rate
         val padding = (b2 shr 1) and 0x01
 
         val sampleRate = when (versionId) {
@@ -318,7 +415,11 @@ object Mp3Id3Engine {
             else -> return -1
         }
 
-        val bitrate = if (versionId == 3) {
+        // If bitrateIdx is 0 (Free format / Xing header), use nominal 128 kbps (or 64 kbps for MPEG-2)
+        val nominalBitrate = if (versionId == 3) 128 else 64
+        val bitrate = if (bitrateIdx == 0) {
+            nominalBitrate
+        } else if (versionId == 3) {
             when (layerId) {
                 1 -> intArrayOf(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)[bitrateIdx]
                 2 -> intArrayOf(0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384)[bitrateIdx]
@@ -333,7 +434,7 @@ object Mp3Id3Engine {
         }
 
         return when (layerId) {
-            1 -> {
+            1 -> { // Layer III (MP3)
                 val coefficient = if (versionId == 3) 144 else 72
                 (coefficient * bitrate * 1000) / sampleRate + padding
             }

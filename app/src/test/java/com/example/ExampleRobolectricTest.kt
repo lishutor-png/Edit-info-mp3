@@ -134,6 +134,7 @@ class ExampleRobolectricTest {
             assertEquals("New Artist", readMeta.artist)
             assertNotNull("Cover image should not be null!", readMeta.coverImageBytes)
             assertEquals(fakeJpeg.size, readMeta.coverImageBytes?.size)
+
         } finally {
             tempDir.deleteRecursively()
         }
