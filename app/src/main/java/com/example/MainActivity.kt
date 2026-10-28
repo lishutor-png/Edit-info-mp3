@@ -114,12 +114,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.data?.let { uri ->
+            viewModel.loadAudioFromUri(uri)
+        }
+    }
+
     private fun openInDefaultPlayer(uri: Uri) {
         try {
             val playIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "audio/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                clipData = android.content.ClipData.newRawUri("Audio", uri)
             }
             startActivity(Intent.createChooser(playIntent, "Putar dengan Pemutar Musik"))
         } catch (e: Exception) {
@@ -138,10 +147,34 @@ fun MainScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val pickAudioLauncher = rememberLauncherForActivityResult(
+    // Primary SAF document picker (supports all MIME types on Xiaomi/MIUI)
+    val openDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (ignored: Exception) {}
+            viewModel.loadAudioFromUri(it)
+        }
+    }
+
+    // Secondary fallback picker
+    val getContentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let { viewModel.loadAudioFromUri(it) }
+    }
+
+    val launchAudioPicker: () -> Unit = {
+        try {
+            openDocumentLauncher.launch(arrayOf("audio/*", "application/octet-stream", "*/*"))
+        } catch (e: Exception) {
+            getContentLauncher.launch("audio/*")
+        }
     }
 
     val pickImageLauncher = rememberLauncherForActivityResult(
@@ -192,7 +225,7 @@ fun MainScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { pickAudioLauncher.launch("audio/mpeg") },
+                        onClick = launchAudioPicker,
                         modifier = Modifier.testTag("action_pick_file")
                     ) {
                         Icon(
@@ -218,8 +251,11 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (uiState.sourceFile == null) {
-                // Empty state
-                EmptyStateCard(onPickFile = { pickAudioLauncher.launch("audio/mpeg") })
+                // Empty state with pick button and instant sample button
+                EmptyStateCard(
+                    onPickFile = launchAudioPicker,
+                    onLoadSample = { viewModel.loadSampleTrack() }
+                )
             } else {
                 // Loaded file UI
                 CoverImageSection(
@@ -313,11 +349,14 @@ fun MainScreen(
 }
 
 @Composable
-fun EmptyStateCard(onPickFile: () -> Unit) {
+fun EmptyStateCard(
+    onPickFile: () -> Unit,
+    onLoadSample: () -> Unit
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 32.dp),
+            .padding(vertical = 24.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         ),
@@ -326,7 +365,7 @@ fun EmptyStateCard(onPickFile: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(32.dp),
+                .padding(28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Box(
@@ -351,7 +390,7 @@ fun EmptyStateCard(onPickFile: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Edit judul lagu, nama artis, album, dan cover gambar agar tampil rapi di pemutar musik HP Anda.",
+                text = "Buka file MP3 apapun di HP Anda untuk mengedit judul lagu, nama artis, album, dan menambahkan gambar cover album.",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -359,12 +398,28 @@ fun EmptyStateCard(onPickFile: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
             Button(
                 onClick = onPickFile,
-                modifier = Modifier.testTag("button_select_mp3"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .testTag("button_select_mp3"),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Icon(Icons.Default.FileOpen, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Pilih MP3 Sekarang")
+                Text("Pilih MP3 dari HP", fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onLoadSample,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("button_load_sample"),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Coba dengan Contoh Lagu (Sample)")
             }
         }
     }
@@ -377,10 +432,40 @@ fun CoverImageSection(
     onRemoveImage: () -> Unit
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        // Status Badge
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = if (coverBitmap != null) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            modifier = Modifier.padding(bottom = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = if (coverBitmap != null) Icons.Default.CheckCircle else Icons.Default.Image,
+                    contentDescription = null,
+                    tint = if (coverBitmap != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (coverBitmap != null) "Cover Album Terpasang" else "Belum Ada Cover Album",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (coverBitmap != null) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
         Box(
             modifier = Modifier
-                .size(180.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .size(200.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .clickable { onPickImage() },
             contentAlignment = Alignment.Center
@@ -393,18 +478,20 @@ fun CoverImageSection(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
                     Icon(
                         imageVector = Icons.Default.Image,
                         contentDescription = "Tambah Sampul",
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(54.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Ketuk untuk Tambah Sampul",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "Ketuk untuk Tambah Cover",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
                     )
                 }
             }

@@ -80,13 +80,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     Mp3Id3Engine.extractMetadata(context, tempInput)
                 }
 
-                // If title is missing, try reading from ContentResolver displayName
-                val finalMeta = if (detectedMeta.title.isBlank() || detectedMeta.title == "Lagu") {
-                    val resolvedName = getFileNameFromUri(context, uri) ?: tempInput.name
-                    val cleanTitle = resolvedName.substringBeforeLast(".")
+                // If title is missing or generic, resolve from URI displayName
+                val resolvedName = getFileNameFromUri(context, uri)
+                    ?: uri.lastPathSegment?.substringAfterLast("/")
+                    ?: "Lagu.mp3"
+                val cleanTitle = resolvedName.substringBeforeLast(".")
+
+                val finalMeta = if (detectedMeta.title.isBlank() || detectedMeta.title == "Lagu" || detectedMeta.title == "imported_source") {
                     detectedMeta.copy(title = cleanTitle, fileName = resolvedName)
                 } else {
-                    detectedMeta
+                    detectedMeta.copy(fileName = resolvedName)
                 }
 
                 prepareAudioPlayer(tempInput)
@@ -104,6 +107,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(isLoading = false, statusMessage = "Gagal membaca audio: ${e.localizedMessage}")
                 }
+            }
+        }
+    }
+
+    fun loadSampleTrack() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, statusMessage = "Membuat lagu sample...") }
+            try {
+                val context = getApplication<Application>()
+                val sampleFile = withContext(Dispatchers.IO) {
+                    com.example.mp3.SampleMp3Helper.createSampleMp3File(context)
+                }
+                val meta = withContext(Dispatchers.IO) {
+                    Mp3Id3Engine.extractMetadata(context, sampleFile)
+                }
+                prepareAudioPlayer(sampleFile)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        sourceFile = sampleFile,
+                        metadata = meta,
+                        statusMessage = "Contoh lagu berhasil dimuat."
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _uiState.update { it.copy(isLoading = false, statusMessage = "Gagal memuat sample: ${e.localizedMessage}") }
             }
         }
     }

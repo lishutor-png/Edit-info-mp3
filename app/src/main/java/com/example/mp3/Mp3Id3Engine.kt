@@ -138,82 +138,16 @@ object Mp3Id3Engine {
 
     /**
      * Export MP3 with updated metadata and album cover art.
-     * Uses mp3agic for frame-accurate multiplexing with robust fallback.
+     * Uses 100% byte-exact streaming multiplexer:
+     * 1. Writes standard ID3v2.3 tag with ISO-8859-1 / UTF-16 BOM and APIC front cover (Picture Type 3).
+     * 2. Copies raw MPEG audio bitstream frame-for-frame preserving Xing/VBR/Info headers.
+     * 3. Never truncates trailing MPEG frame bytes, eliminating ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED.
+     * 4. Appends standard 128-byte ID3v1 trailer for universal legacy compatibility.
      */
     fun exportMp3(sourceFile: File, newMetadata: Mp3Metadata, outputStream: OutputStream) {
-        val tempExport = File.createTempFile("mp3_tag_out_${System.currentTimeMillis()}", ".mp3")
-        var success = false
-
-        try {
-            val mp3file = Mp3File(sourceFile.absolutePath)
-
-            // Construct clean standard ID3v2.3 tag
-            val id3v2 = ID3v23Tag()
-            val effectiveTitle = newMetadata.title.ifBlank { "Lagu" }.trim()
-            val effectiveArtist = newMetadata.artist.ifBlank { "Artis" }.trim()
-            val effectiveAlbum = newMetadata.album.ifBlank { effectiveTitle }.trim()
-
-            id3v2.title = effectiveTitle
-            id3v2.artist = effectiveArtist
-            id3v2.album = effectiveAlbum
-            if (newMetadata.year.isNotBlank()) id3v2.year = newMetadata.year.trim()
-            if (newMetadata.trackNumber.isNotBlank()) id3v2.track = newMetadata.trackNumber.trim()
-            if (newMetadata.genre.isNotBlank()) {
-                try {
-                    id3v2.genreDescription = newMetadata.genre.trim()
-                } catch (ignored: Exception) {}
-            }
-
-            // Set APIC cover art (using Picture Type 3 = Front Cover for Android Stagefright compatibility)
-            val cover = newMetadata.coverImageBytes
-            if (cover != null && cover.isNotEmpty()) {
-                val mime = if (newMetadata.coverMimeType.contains("png", true)) "image/png" else "image/jpeg"
-                try {
-                    id3v2.setAlbumImage(cover, mime, 3.toByte(), "Cover")
-                } catch (e: Exception) {
-                    id3v2.setAlbumImage(cover, mime)
-                }
-            } else {
-                id3v2.clearAlbumImage()
-            }
-
-            mp3file.id3v2Tag = id3v2
-
-            // Also include ID3v1 tag for legacy players
-            val id3v1 = ID3v1Tag()
-            id3v1.title = effectiveTitle.take(30)
-            id3v1.artist = effectiveArtist.take(30)
-            id3v1.album = effectiveAlbum.take(30)
-            id3v1.year = newMetadata.year.trim().take(4)
-            id3v1.track = newMetadata.trackNumber.trim().take(4)
-            mp3file.id3v1Tag = id3v1
-
-            mp3file.save(tempExport.absolutePath)
-
-            tempExport.inputStream().use { input ->
-                input.copyTo(outputStream)
-            }
-            outputStream.flush()
-            success = true
-        } catch (e: Exception) {
-            e.printStackTrace()
-        } finally {
-            tempExport.delete()
-        }
-
-        if (!success) {
-            // Fallback directly to low-level byte-exact multiplexer
-            exportMp3Fallback(sourceFile, newMetadata, outputStream)
-        }
-    }
-
-    /**
-     * Low-level byte-exact multiplexer fallback.
-     */
-    fun exportMp3Fallback(sourceFile: File, newMetadata: Mp3Metadata, outputStream: OutputStream) {
         val offsets = findAudioStreamOffsets(sourceFile)
 
-        // 1. Write ID3v2.3 tag
+        // 1. Write clean ID3v2.3 tag
         val id3v2Bytes = buildId3v23Tag(newMetadata)
         outputStream.write(id3v2Bytes)
 

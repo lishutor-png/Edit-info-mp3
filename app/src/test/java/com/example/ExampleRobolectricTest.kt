@@ -138,5 +138,19 @@ class ExampleRobolectricTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun testSampleMp3HelperGeneratesValidTrack() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val sampleFile = com.example.mp3.SampleMp3Helper.createSampleMp3File(context)
+        assertTrue(sampleFile.exists())
+        assertTrue(sampleFile.length() > 5000)
+
+        val meta = Mp3Id3Engine.extractMetadata(context, sampleFile)
+        assertEquals("Harmoni Petang", meta.title)
+        assertEquals("Lish Project", meta.artist)
+        assertNotNull(meta.coverImageBytes)
+        assertTrue(meta.coverImageBytes!!.isNotEmpty())
+    }
 }
 
