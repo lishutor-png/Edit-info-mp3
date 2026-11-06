@@ -125,7 +125,7 @@ class MainActivity : ComponentActivity() {
     private fun openInDefaultPlayer(uri: Uri) {
         try {
             val playIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "audio/*")
+                setDataAndType(uri, "audio/mpeg")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 clipData = android.content.ClipData.newRawUri("Audio", uri)

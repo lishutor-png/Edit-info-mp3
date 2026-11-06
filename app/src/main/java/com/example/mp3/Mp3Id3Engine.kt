@@ -185,6 +185,9 @@ object Mp3Id3Engine {
         }
 
         var id3v2Size = 0L
+        var audioStart = 0L
+        var audioEnd = fileLength
+        var hasId3v1 = false
 
         RandomAccessFile(file, "r").use { raf ->
             val header = ByteArray(10)
@@ -206,10 +209,16 @@ object Mp3Id3Engine {
                 id3v2Size = 0L
             }
 
-            val audioStart = findFirstMpegSyncOffset(raf, id3v2Size, fileLength)
+            if (fileLength >= 10) {
+                raf.seek(0)
+                val leadTag = ByteArray(3)
+                if (raf.read(leadTag, 0, 3) == 3 && leadTag[0] == 'T'.code.toByte() && leadTag[1] == 'A'.code.toByte() && leadTag[2] == 'G'.code.toByte()) {
+                    // Rare legacy MP3 with ID3v1 at byte 0
+                    id3v2Size = 128L
+                }
+            }
 
-            var audioEnd = fileLength
-            var hasId3v1 = false
+            audioStart = findFirstMpegSyncOffset(raf, id3v2Size, fileLength)
 
             if (fileLength >= 128) {
                 raf.seek(fileLength - 128)
@@ -243,324 +252,125 @@ object Mp3Id3Engine {
                     }
                 }
             }
-
-            if (audioEnd <= audioStart) {
-                audioEnd = fileLength
-            }
-
-            return AudioOffsets(audioStart, audioEnd, id3v2Size, hasId3v1)
         }
+
+        if (audioEnd <= audioStart) {
+            audioEnd = fileLength
+        }
+
+        return AudioOffsets(audioStart, audioEnd, id3v2Size, hasId3v1)
     }
 
-    private fun findFirstMpegSyncOffset(raf: RandomAccessFile, startSearch: Long, fileLength: Long): Long {
-        val safeStart = startSearch.coerceIn(0L, (fileLength - 4).coerceAtLeast(0L))
-        if (fileLength < 4) return safeStart
+    private fun findFirstMpegSyncOffset(raf: RandomAccessFile, startOffset: Long, fileLength: Long): Long {
+        if (startOffset >= fileLength - 4) return startOffset
+        val searchWindow = minOf(65536L, fileLength - startOffset)
+        raf.seek(startOffset)
+        val buf = ByteArray(searchWindow.toInt())
+        val read = raf.read(buf)
+        if (read < 4) return startOffset
 
-        // 1. Direct check: Is safeStart ALREADY the beginning of consecutive valid MPEG frames?
-        if (verifyConsecutiveFrames(raf, safeStart, fileLength)) {
-            return safeStart
-        }
-
-        // 2. Skip leading 0x00 or 0xFF padding right after ID3 tag or at start of file
-        var current = safeStart
-        val leadBuffer = ByteArray(minOf(4096, (fileLength - current).toInt()))
-        raf.seek(current)
-        val leadRead = raf.read(leadBuffer)
-        if (leadRead > 0) {
-            var skipCount = 0
-            while (skipCount < leadRead && (leadBuffer[skipCount] == 0x00.toByte())) {
-                skipCount++
-            }
-            if (skipCount > 0 && skipCount < leadRead) {
-                val candidateAfterZeros = current + skipCount
-                if (verifyConsecutiveFrames(raf, candidateAfterZeros, fileLength)) {
-                    return candidateAfterZeros
+        var i = 0
+        while (i < read - 3) {
+            val b0 = buf[i].toInt() and 0xFF
+            val b1 = buf[i + 1].toInt() and 0xFF
+            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
+                val version = (b1 ushr 3) and 0x03
+                val layer = (b1 ushr 1) and 0x03
+                val b2 = buf[i + 2].toInt() and 0xFF
+                val bitrateIndex = (b2 ushr 4) and 0x0F
+                val sampleRateIndex = (b2 ushr 2) and 0x03
+                if (version != 1 && layer != 0 && bitrateIndex != 0 && bitrateIndex != 15 && sampleRateIndex != 3) {
+                    return startOffset + i
                 }
             }
+            i++
         }
-
-        // 3. Scan forward up to 64KB, requiring MULTI-FRAME confirmation (prevents false sync inside audio payload)
-        val maxSearch = minOf(safeStart + 65536L, (fileLength - 4).coerceAtLeast(0L))
-        var searchOffset = safeStart
-        val bufferSize = 8192
-        val buffer = ByteArray(bufferSize + 4)
-
-        while (searchOffset < maxSearch) {
-            raf.seek(searchOffset)
-            val bytesToRead = minOf(bufferSize.toLong(), fileLength - searchOffset).toInt()
-            if (bytesToRead < 4) break
-            val read = raf.read(buffer, 0, bytesToRead)
-            if (read < 4) break
-
-            for (i in 0 until (read - 3)) {
-                val b0 = buffer[i].toInt() and 0xFF
-                val b1 = buffer[i + 1].toInt() and 0xFF
-
-                if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
-                    val candidatePos = searchOffset + i
-                    if (verifyConsecutiveFrames(raf, candidatePos, fileLength)) {
-                        return candidatePos
-                    }
-                }
-            }
-            searchOffset += (read - 3)
-        }
-
-        // Fallback: If no multi-frame sequence confirmed, trust safeStart
-        return safeStart
-    }
-
-    /**
-     * Verifies that candidateOffset is the start of a real MPEG stream by verifying that
-     * candidate frame and the consecutive following frame have matching MPEG version and sample rate.
-     */
-    private fun verifyConsecutiveFrames(raf: RandomAccessFile, candidateOffset: Long, fileLength: Long): Boolean {
-        if (candidateOffset + 4 > fileLength) return false
-
-        val header1 = ByteArray(4)
-        raf.seek(candidateOffset)
-        if (raf.read(header1, 0, 4) < 4) return false
-
-        val size1 = getMpegFrameSize(header1, 0, 4)
-        if (size1 <= 0) return false
-
-        // Check if this frame has a Xing / Info header (VBR container header)
-        if (hasXingHeader(raf, candidateOffset, fileLength)) {
-            return true
-        }
-
-        val nextOffset = candidateOffset + size1
-        if (nextOffset >= fileLength) {
-            // Reached exact end of file on a valid frame
-            return true
-        }
-
-        if (nextOffset + 4 > fileLength) {
-            return false
-        }
-
-        val header2 = ByteArray(4)
-        raf.seek(nextOffset)
-        if (raf.read(header2, 0, 4) < 4) return false
-
-        val size2 = getMpegFrameSize(header2, 0, 4)
-        if (size2 <= 0) return false
-
-        // Verify version and sample rate match between consecutive frames
-        val v1 = (header1[1].toInt() shr 3) and 0x03
-        val v2 = (header2[1].toInt() shr 3) and 0x03
-        val l1 = (header1[1].toInt() shr 1) and 0x03
-        val l2 = (header2[1].toInt() shr 1) and 0x03
-        val sr1 = (header1[2].toInt() shr 2) and 0x03
-        val sr2 = (header2[2].toInt() shr 2) and 0x03
-
-        return (v1 == v2 && l1 == l2 && sr1 == sr2)
-    }
-
-    private fun hasXingHeader(raf: RandomAccessFile, frameOffset: Long, fileLength: Long): Boolean {
-        // Xing / Info signature is located at frameOffset + 36 (for MPEG1 stereo) or + 21 (MPEG1 mono / MPEG2 stereo)
-        for (offset in intArrayOf(36, 21, 13)) {
-            val target = frameOffset + offset
-            if (target + 4 <= fileLength) {
-                raf.seek(target)
-                val sig = ByteArray(4)
-                if (raf.read(sig, 0, 4) == 4) {
-                    val str = String(sig, StandardCharsets.US_ASCII)
-                    if (str == "Xing" || str == "Info" || str == "VBRI") {
-                        return true
-                    }
-                }
-            }
-        }
-        return false
-    }
-
-    fun getMpegFrameSize(buffer: ByteArray, offset: Int, bufferLen: Int): Int {
-        if (offset + 4 > bufferLen) return -1
-        val b0 = buffer[offset].toInt() and 0xFF
-        val b1 = buffer[offset + 1].toInt() and 0xFF
-        val b2 = buffer[offset + 2].toInt() and 0xFF
-
-        if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return -1
-        val versionId = (b1 shr 3) and 0x03
-        if (versionId == 1) return -1 // Reserved version
-        val layerId = (b1 shr 1) and 0x03
-        if (layerId == 0) return -1 // Reserved layer
-
-        val bitrateIdx = (b2 shr 4) and 0x0F
-        if (bitrateIdx == 15) return -1 // Bad bitrate
-        val sampleRateIdx = (b2 shr 2) and 0x03
-        if (sampleRateIdx == 3) return -1 // Reserved sample rate
-        val padding = (b2 shr 1) and 0x01
-
-        val sampleRate = when (versionId) {
-            3 -> when (sampleRateIdx) {
-                0 -> 44100
-                1 -> 48000
-                2 -> 32000
-                else -> return -1
-            }
-            2 -> when (sampleRateIdx) {
-                0 -> 22050
-                1 -> 24000
-                2 -> 16000
-                else -> return -1
-            }
-            0 -> when (sampleRateIdx) {
-                0 -> 11025
-                1 -> 12000
-                2 -> 8000
-                else -> return -1
-            }
-            else -> return -1
-        }
-
-        // If bitrateIdx is 0 (Free format / Xing header), use nominal 128 kbps (or 64 kbps for MPEG-2)
-        val nominalBitrate = if (versionId == 3) 128 else 64
-        val bitrate = if (bitrateIdx == 0) {
-            nominalBitrate
-        } else if (versionId == 3) {
-            when (layerId) {
-                1 -> intArrayOf(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)[bitrateIdx]
-                2 -> intArrayOf(0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384)[bitrateIdx]
-                3 -> intArrayOf(0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448)[bitrateIdx]
-                else -> return -1
-            }
-        } else {
-            when (layerId) {
-                1, 2, 3 -> intArrayOf(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)[bitrateIdx]
-                else -> return -1
-            }
-        }
-
-        return when (layerId) {
-            1 -> { // Layer III (MP3)
-                val coefficient = if (versionId == 3) 144 else 72
-                (coefficient * bitrate * 1000) / sampleRate + padding
-            }
-            2 -> (144 * bitrate * 1000) / sampleRate + padding
-            3 -> ((12 * bitrate * 1000) / sampleRate + padding) * 4
-            else -> -1
-        }
+        return startOffset
     }
 
     fun buildId3v23Tag(metadata: Mp3Metadata): ByteArray {
-        val framesOut = ByteArrayOutputStream()
+        val tag = ID3v23Tag().apply {
+            title = metadata.title.ifBlank { "Lagu" }.trim()
+            artist = metadata.artist.ifBlank { "Artis" }.trim()
+            album = metadata.album.ifBlank { title }.trim()
+            if (metadata.year.isNotBlank()) year = metadata.year.trim()
+            if (metadata.genre.isNotBlank()) {
+                val g = metadata.genre.trim()
+                try {
+                    genreDescription = g
+                } catch (ignored: Exception) {}
+            }
+            if (metadata.trackNumber.isNotBlank()) {
+                track = metadata.trackNumber.trim()
+            }
+            comment = "LishEdInfo"
 
-        val title = metadata.title.ifBlank { "Lagu" }.trim()
-        val artist = metadata.artist.ifBlank { "Artis" }.trim()
-        val album = metadata.album.ifBlank { title }.trim()
-
-        writeTextFrame(framesOut, "TIT2", title)
-        writeTextFrame(framesOut, "TPE1", artist)
-        writeTextFrame(framesOut, "TALB", album)
-        if (metadata.year.isNotBlank()) writeTextFrame(framesOut, "TYER", metadata.year.trim())
-        if (metadata.genre.isNotBlank()) writeTextFrame(framesOut, "TCON", metadata.genre.trim())
-        if (metadata.trackNumber.isNotBlank()) writeTextFrame(framesOut, "TRCK", metadata.trackNumber.trim())
-
-        val cover = metadata.coverImageBytes
-        if (cover != null && cover.isNotEmpty()) {
-            writeApicFrame(framesOut, cover, metadata.coverMimeType)
+            val cover = metadata.coverImageBytes
+            if (cover != null && cover.isNotEmpty()) {
+                val cleanMime = if (metadata.coverMimeType.contains("png", ignoreCase = true)) "image/png" else "image/jpeg"
+                setAlbumImage(cover, cleanMime, 3.toByte(), "")
+            }
+            padding = true
         }
-
-        val framesBytes = framesOut.toByteArray()
-        val framesSize = framesBytes.size
-
-        val header = ByteArray(10)
-        header[0] = 'I'.code.toByte()
-        header[1] = 'D'.code.toByte()
-        header[2] = '3'.code.toByte()
-        header[3] = 0x03 // ID3v2.3
-        header[4] = 0x00
-        header[5] = 0x00
-
-        header[6] = ((framesSize shr 21) and 0x7F).toByte()
-        header[7] = ((framesSize shr 14) and 0x7F).toByte()
-        header[8] = ((framesSize shr 7) and 0x7F).toByte()
-        header[9] = (framesSize and 0x7F).toByte()
-
-        val fullTag = ByteArray(10 + framesSize)
-        System.arraycopy(header, 0, fullTag, 0, 10)
-        System.arraycopy(framesBytes, 0, fullTag, 10, framesSize)
-        return fullTag
-    }
-
-    private fun writeTextFrame(out: ByteArrayOutputStream, frameId: String, text: String) {
-        val payloadOut = ByteArrayOutputStream()
-        val isAscii = text.all { it.code in 32..126 || it == '\n' || it == '\r' || it == '\t' }
-
-        if (isAscii) {
-            payloadOut.write(0x00)
-            payloadOut.write(text.toByteArray(StandardCharsets.ISO_8859_1))
-        } else {
-            payloadOut.write(0x01)
-            payloadOut.write(0xFF)
-            payloadOut.write(0xFE)
-            payloadOut.write(text.toByteArray(StandardCharsets.UTF_16LE))
-        }
-
-        val payload = payloadOut.toByteArray()
-        out.write(frameId.toByteArray(StandardCharsets.US_ASCII))
-
-        val size = payload.size
-        out.write((size shr 24) and 0xFF)
-        out.write((size shr 16) and 0xFF)
-        out.write((size shr 8) and 0xFF)
-        out.write(size and 0xFF)
-
-        out.write(0x00)
-        out.write(0x00)
-        out.write(payload)
-    }
-
-    private fun writeApicFrame(out: ByteArrayOutputStream, imageBytes: ByteArray, mimeType: String) {
-        val payloadOut = ByteArrayOutputStream()
-        payloadOut.write(0x00)
-
-        val cleanMime = if (mimeType.contains("png", ignoreCase = true)) "image/png" else "image/jpeg"
-        payloadOut.write(cleanMime.toByteArray(StandardCharsets.ISO_8859_1))
-        payloadOut.write(0x00)
-
-        payloadOut.write(0x03)
-        payloadOut.write(0x00)
-
-        payloadOut.write(imageBytes)
-
-        val payload = payloadOut.toByteArray()
-        out.write("APIC".toByteArray(StandardCharsets.US_ASCII))
-
-        val size = payload.size
-        out.write((size shr 24) and 0xFF)
-        out.write((size shr 16) and 0xFF)
-        out.write((size shr 8) and 0xFF)
-        out.write(size and 0xFF)
-
-        out.write(0x00)
-        out.write(0x00)
-        out.write(payload)
+        return tag.toBytes()
     }
 
     fun buildId3v1Tag(metadata: Mp3Metadata): ByteArray {
-        val tag = ByteArray(128)
-        tag[0] = 'T'.code.toByte()
-        tag[1] = 'A'.code.toByte()
-        tag[2] = 'G'.code.toByte()
-
-        writeIsoString(tag, 3, 30, metadata.title)
-        writeIsoString(tag, 33, 30, metadata.artist)
-        writeIsoString(tag, 63, 30, metadata.album)
-        writeIsoString(tag, 93, 4, metadata.year)
-        writeIsoString(tag, 97, 28, "LishEdInfo")
-        tag[125] = 0x00
-        tag[126] = (metadata.trackNumber.toIntOrNull() ?: 0).coerceIn(0, 255).toByte()
-        tag[127] = 255.toByte()
-
-        return tag
+        val tag = ID3v1Tag().apply {
+            title = metadata.title.ifBlank { "Lagu" }.trim()
+            artist = metadata.artist.ifBlank { "Artis" }.trim()
+            album = metadata.album.ifBlank { title }.trim()
+            if (metadata.year.isNotBlank()) year = metadata.year.trim()
+            if (metadata.trackNumber.isNotBlank()) track = metadata.trackNumber.trim()
+            comment = "LishEdInfo"
+            val gCode = findId3v1GenreCode(metadata.genre.trim())
+            setGenre(gCode)
+        }
+        return tag.toBytes()
     }
 
-    private fun writeIsoString(dest: ByteArray, offset: Int, maxLen: Int, text: String) {
-        val bytes = text.toByteArray(StandardCharsets.ISO_8859_1)
-        val copyLen = bytes.size.coerceAtMost(maxLen)
-        System.arraycopy(bytes, 0, dest, offset, copyLen)
+    private fun findId3v1GenreCode(genreName: String): Int {
+        if (genreName.isBlank()) return 255
+        val standardGenres = mapOf(
+            "blues" to 0, "classic rock" to 1, "country" to 2, "dance" to 3, "disco" to 4,
+            "funk" to 5, "grunge" to 6, "hip hop" to 7, "hip-hop" to 7, "jazz" to 8,
+            "metal" to 9, "new age" to 10, "oldies" to 11, "other" to 12, "pop" to 13,
+            "r&b" to 14, "rap" to 15, "reggae" to 16, "rock" to 17, "techno" to 18,
+            "industrial" to 19, "alternative" to 20, "ska" to 21, "death metal" to 22,
+            "pranks" to 23, "soundtrack" to 24, "euro-techno" to 25, "ambient" to 26,
+            "trip-hop" to 27, "vocal" to 28, "jazz+funk" to 29, "fusion" to 30,
+            "trance" to 31, "classical" to 32, "instrumental" to 33, "acid" to 34,
+            "house" to 35, "game" to 36, "sound clip" to 37, "gospel" to 38,
+            "noise" to 39, "alternrock" to 40, "bass" to 41, "soul" to 42,
+            "punk" to 43, "space" to 44, "meditative" to 45, "instrumental pop" to 46,
+            "instrumental rock" to 47, "ethnic" to 48, "gothic" to 49, "darkwave" to 50,
+            "techno-industrial" to 51, "electronic" to 52, "pop-folk" to 53, "eurodance" to 54,
+            "dream" to 55, "southern rock" to 56, "comedy" to 57, "cult" to 58,
+            "gangsta" to 59, "top 40" to 60, "christian rap" to 61, "pop/funk" to 62,
+            "jungle" to 63, "native american" to 64, "cabaret" to 65, "new wave" to 66,
+            "psychedelic" to 67, "rave" to 68, "showtunes" to 69, "trailer" to 70,
+            "lo-fi" to 71, "tribal" to 72, "acid punk" to 73, "acid jazz" to 74,
+            "polka" to 75, "retro" to 76, "musical" to 77, "rock & roll" to 78,
+            "hard rock" to 79, "folk" to 80, "folk-rock" to 81, "national folk" to 82,
+            "swing" to 83, "fast fusion" to 84, "bebob" to 85, "latin" to 86,
+            "revival" to 87, "celtic" to 88, "bluegrass" to 89, "avantgarde" to 90,
+            "gothic rock" to 91, "progressive rock" to 92, "psychedelic rock" to 93,
+            "symphonic rock" to 94, "slow rock" to 95, "big band" to 96, "chorus" to 97,
+            "easy listening" to 98, "acoustic" to 99, "akustik" to 99, "humour" to 100,
+            "speech" to 101, "chanson" to 102, "opera" to 103, "chamber music" to 104,
+            "sonata" to 105, "symphony" to 106, "booty bass" to 107, "primus" to 108,
+            "porn groove" to 109, "satire" to 110, "slow jam" to 111, "club" to 112,
+            "tango" to 113, "samba" to 114, "folklore" to 115, "ballad" to 116,
+            "power ballad" to 117, "rhythmic soul" to 118, "freestyle" to 119,
+            "duet" to 120, "punk rock" to 121, "drum solo" to 122, "a cappella" to 123,
+            "euro-house" to 124, "dance hall" to 125, "goa" to 126, "drum & bass" to 127,
+            "club-house" to 128, "hardcore" to 129, "terror" to 130, "indie" to 131,
+            "britpop" to 132, "afro-punk" to 133, "polsk punk" to 134, "beat" to 135,
+            "christian gangsta rap" to 136, "heavy metal" to 137, "black metal" to 138,
+            "crossover" to 139, "contemporary christian" to 140, "christian rock" to 141,
+            "merengue" to 142, "salsa" to 143, "thrash metal" to 144, "anime" to 145,
+            "jpop" to 146, "synthpop" to 147
+        )
+        return standardGenres[genreName.lowercase()] ?: 255
     }
 }
