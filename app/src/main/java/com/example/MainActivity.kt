@@ -108,7 +108,7 @@ class MainActivity : ComponentActivity() {
             LishEdInfoTheme {
                 MainScreen(
                     viewModel = viewModel,
-                    onOpenDefaultPlayer = { uri -> openInDefaultPlayer(uri) }
+                    onOpenDefaultPlayer = { uri, mimeType -> openInDefaultPlayer(uri, mimeType) }
                 )
             }
         }
@@ -122,10 +122,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openInDefaultPlayer(uri: Uri) {
+    private fun openInDefaultPlayer(uri: Uri, mimeType: String = "audio/mpeg") {
         try {
             val playIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "audio/mpeg")
+                setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 clipData = android.content.ClipData.newRawUri("Audio", uri)
@@ -141,7 +141,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
-    onOpenDefaultPlayer: (Uri) -> Unit
+    onOpenDefaultPlayer: (Uri, String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -191,7 +191,7 @@ fun MainScreen(
     }
 
     val exportFileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("audio/mpeg")
+        contract = ActivityResultContracts.CreateDocument("audio/*")
     ) { uri: Uri? ->
         uri?.let { viewModel.exportToDestinationUri(it) }
     }
@@ -296,7 +296,8 @@ fun MainScreen(
                     onExportCustom = {
                         val title = uiState.metadata?.title?.ifBlank { "Lagu" } ?: "Lagu"
                         val artist = uiState.metadata?.artist?.ifBlank { "Artis" } ?: "Artis"
-                        exportFileLauncher.launch("${title} - ${artist}.mp3")
+                        val ext = uiState.metadata?.audioFormat?.extension ?: "mp3"
+                        exportFileLauncher.launch("${title} - ${artist}.${ext}")
                     }
                 )
 
@@ -312,7 +313,8 @@ fun MainScreen(
             onDismiss = { viewModel.dismissSuccessDialog() },
             onPlayNow = {
                 uiState.exportedSuccessUri?.let { uri ->
-                    onOpenDefaultPlayer(uri)
+                    val mimeType = uiState.metadata?.audioFormat?.mimeType ?: "audio/mpeg"
+                    onOpenDefaultPlayer(uri, mimeType)
                 }
                 viewModel.dismissSuccessDialog()
             }

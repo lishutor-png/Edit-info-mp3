@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.mp3.AudioMetadataEngine
 import com.example.mp3.ImageUtils
 import com.example.mp3.Mp3Id3Engine
 import com.example.mp3.Mp3Metadata
@@ -59,10 +60,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadAudioFromUri(uri: Uri) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, statusMessage = "Membaca file MP3...") }
+            _uiState.update { it.copy(isLoading = true, statusMessage = "Membaca file audio...") }
             try {
                 val context = getApplication<Application>()
-                val tempInput = File(context.cacheDir, "imported_source.mp3")
+                val tempInput = File(context.cacheDir, "imported_source.bin")
 
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.use { input ->
@@ -77,19 +78,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 val detectedMeta = withContext(Dispatchers.IO) {
-                    Mp3Id3Engine.extractMetadata(context, tempInput)
+                    AudioMetadataEngine.extractMetadata(context, tempInput)
                 }
 
                 // If title is missing or generic, resolve from URI displayName
-                val resolvedName = getFileNameFromUri(context, uri)
+                val properExt = detectedMeta.audioFormat.extension
+                val rawDisplayName = getFileNameFromUri(context, uri)
                     ?: uri.lastPathSegment?.substringAfterLast("/")
-                    ?: "Lagu.mp3"
-                val cleanTitle = resolvedName.substringBeforeLast(".")
+                    ?: "Lagu.$properExt"
 
-                val finalMeta = if (detectedMeta.title.isBlank() || detectedMeta.title == "Lagu" || detectedMeta.title == "imported_source") {
-                    detectedMeta.copy(title = cleanTitle, fileName = resolvedName)
+                val cleanTitle = rawDisplayName.substringBeforeLast(".")
+                val normalizedFileName = if (rawDisplayName.contains(".")) {
+                    "${cleanTitle}.${properExt}"
                 } else {
-                    detectedMeta.copy(fileName = resolvedName)
+                    "${rawDisplayName}.${properExt}"
+                }
+
+                val finalMeta = if (detectedMeta.title.isBlank() || detectedMeta.title == "Lagu" ||
+                    detectedMeta.title == "imported_source" || detectedMeta.title == "Audio") {
+                    detectedMeta.copy(title = cleanTitle, fileName = normalizedFileName)
+                } else {
+                    detectedMeta.copy(fileName = normalizedFileName)
                 }
 
                 prepareAudioPlayer(tempInput)
@@ -99,7 +108,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isLoading = false,
                         sourceFile = tempInput,
                         metadata = finalMeta,
-                        statusMessage = "File berhasil dimuat."
+                        statusMessage = "File berhasil dimuat (${detectedMeta.audioFormat.displayName})."
                     )
                 }
             } catch (e: Exception) {
@@ -264,16 +273,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val targetTitle = meta.title.ifBlank { "Lagu" }.trim()
                 val targetArtist = meta.artist.ifBlank { "Artis" }.trim()
                 val targetAlbum = meta.album.ifBlank { targetTitle }.trim()
-                val safeFileName = "${targetTitle} - ${targetArtist}.mp3"
+                val properExt = meta.audioFormat.extension
+                val mimeType = meta.audioFormat.mimeType
+                val safeFileName = "${targetTitle} - ${targetArtist}.${properExt}"
                     .replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
-                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.mp3")
-                val previewFile = File(context.cacheDir, "current_editing.mp3")
+                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.${properExt}")
+                val previewFile = File(context.cacheDir, "current_editing.${properExt}")
 
                 val resultUri: Uri? = withContext(Dispatchers.IO) {
                     // Export to temporary file first
                     FileOutputStream(tempFile).use { out ->
-                        Mp3Id3Engine.exportMp3(source, meta, out)
+                        AudioMetadataEngine.exportAudio(source, meta, out)
                     }
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -288,7 +299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             put(MediaStore.Audio.Media.TITLE, targetTitle)
                             put(MediaStore.Audio.Media.ARTIST, targetArtist)
                             put(MediaStore.Audio.Media.ALBUM, targetAlbum)
-                            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                            put(MediaStore.Audio.Media.MIME_TYPE, mimeType)
                             put(MediaStore.Audio.Media.IS_MUSIC, 1)
                             if (meta.genre.isNotBlank()) {
                                 put(MediaStore.Audio.Media.GENRE, meta.genre.trim())
@@ -341,7 +352,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (physicalPath.isNullOrBlank()) {
                                 physicalPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "LishEdInfo/$safeFileName").absolutePath
                             }
-                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf("audio/mpeg"), null)
+                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf(mimeType), null)
                         }
                         uri
                     } else {
@@ -350,7 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val outFile = File(outFolder, safeFileName)
                         tempFile.copyTo(outFile, overwrite = true)
 
-                        MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf("audio/mpeg"), null)
+                        MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf(mimeType), null)
                         Uri.fromFile(outFile)
                     }
                 }
@@ -396,15 +407,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (source == null || meta == null) return
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isExporting = true, statusMessage = "Mengekspor file MP3...") }
+            _uiState.update { it.copy(isExporting = true, statusMessage = "Mengekspor file audio...") }
             try {
                 val context = getApplication<Application>()
-                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.mp3")
-                val previewFile = File(context.cacheDir, "current_editing.mp3")
+                val properExt = meta.audioFormat.extension
+                val tempFile = File(context.cacheDir, "temp_export_${System.currentTimeMillis()}.${properExt}")
+                val previewFile = File(context.cacheDir, "current_editing.${properExt}")
 
                 withContext(Dispatchers.IO) {
                     FileOutputStream(tempFile).use { out ->
-                        Mp3Id3Engine.exportMp3(source, meta, out)
+                        AudioMetadataEngine.exportAudio(source, meta, out)
                     }
                     context.contentResolver.openOutputStream(destinationUri, "wt")?.use { out ->
                         tempFile.inputStream().use { input ->
@@ -419,13 +431,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 prepareAudioPlayer(previewFile)
 
                 val targetTitle = meta.title.ifBlank { "Lagu" }.trim()
-                val fileName = getFileNameFromUri(context, destinationUri) ?: "${targetTitle}.mp3"
+                val fileName = getFileNameFromUri(context, destinationUri) ?: "${targetTitle}.${properExt}"
 
                 _uiState.update {
                     it.copy(
                         isExporting = false,
                         sourceFile = previewFile,
-                        statusMessage = "Ekspor selesai! MP3 berhasil disimpan.",
+                        statusMessage = "Ekspor selesai! ${meta.audioFormat.displayName} berhasil disimpan.",
                         exportedSuccessUri = destinationUri,
                         exportedFileName = fileName,
                         showExportSuccessDialog = true

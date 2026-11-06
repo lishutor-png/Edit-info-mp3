@@ -17,7 +17,8 @@ data class Mp3Metadata(
     val durationMs: Long = 0L,
     val fileSize: Long = 0L,
     val fileName: String = "",
-    val coverBitmap: Bitmap? = null
+    val coverBitmap: Bitmap? = null,
+    val audioFormat: AudioFormat = AudioFormat.MP3
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
