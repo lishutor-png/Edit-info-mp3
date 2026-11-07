@@ -52,11 +52,6 @@ android {
     buildFeatures {
         compose = true
     }
-    testOptions {
-        unitTests {
-            isIncludeAndroidResources = true
-        }
-    }
 }
 
 dependencies {
@@ -74,7 +69,7 @@ dependencies {
     implementation(libs.mp3agic)
 
     testImplementation(libs.junit)
-    testImplementation(libs.robolectric)
+    // testImplementation(libs.robolectric)
     testImplementation(libs.androidx.junit)
 
     debugImplementation(libs.androidx.ui.tooling)
