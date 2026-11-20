@@ -466,13 +466,14 @@ object Mp4MetadataEngine {
                 val boxSize = readUInt32(moovBytes, i).toInt()
                 if (boxSize >= 16 && i + boxSize <= moovBytes.size) {
                     val entryCount = readUInt32(moovBytes, i + 12).toInt()
-                    var ptr = i + 16
-                    for (e in 0 until entryCount) {
-                        if (ptr + 4 > moovBytes.size) break
-                        val currentOffset = readUInt32(moovBytes, ptr)
-                        val newOffset = currentOffset + delta
-                        writeInt(moovBytes, ptr, newOffset.toInt())
-                        ptr += 4
+                    if (entryCount >= 0 && 16L + entryCount.toLong() * 4L == boxSize.toLong()) {
+                        var ptr = i + 16
+                        for (e in 0 until entryCount) {
+                            val currentOffset = readUInt32(moovBytes, ptr)
+                            val newOffset = currentOffset + delta
+                            writeInt(moovBytes, ptr, newOffset.toInt())
+                            ptr += 4
+                        }
                     }
                 }
             } else if (moovBytes[i + 4] == 'c'.code.toByte() &&
@@ -484,13 +485,14 @@ object Mp4MetadataEngine {
                 val boxSize = readUInt32(moovBytes, i).toInt()
                 if (boxSize >= 16 && i + boxSize <= moovBytes.size) {
                     val entryCount = readUInt32(moovBytes, i + 12).toInt()
-                    var ptr = i + 16
-                    for (e in 0 until entryCount) {
-                        if (ptr + 8 > moovBytes.size) break
-                        val currentOffset = readUInt64(moovBytes, ptr)
-                        val newOffset = currentOffset + delta
-                        writeLong(moovBytes, ptr, newOffset)
-                        ptr += 8
+                    if (entryCount >= 0 && 16L + entryCount.toLong() * 8L == boxSize.toLong()) {
+                        var ptr = i + 16
+                        for (e in 0 until entryCount) {
+                            val currentOffset = readUInt64(moovBytes, ptr)
+                            val newOffset = currentOffset + delta
+                            writeLong(moovBytes, ptr, newOffset)
+                            ptr += 8
+                        }
                     }
                 }
             }

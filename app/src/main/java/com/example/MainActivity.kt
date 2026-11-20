@@ -87,6 +87,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.mp3.AudioFormat
 import com.example.mp3.ImageUtils
 import com.example.ui.theme.LishEdInfoTheme
 import java.util.Locale
@@ -129,6 +130,9 @@ class MainActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 clipData = android.content.ClipData.newRawUri("Audio", uri)
+            }
+            if (playIntent.resolveActivity(packageManager) == null && mimeType != "audio/*") {
+                playIntent.setDataAndType(uri, "audio/*")
             }
             startActivity(Intent.createChooser(playIntent, "Putar dengan Pemutar Musik"))
         } catch (e: Exception) {
@@ -190,8 +194,20 @@ fun MainScreen(
         }
     }
 
-    val exportFileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("audio/*")
+    val exportMp3Launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("audio/mpeg")
+    ) { uri: Uri? ->
+        uri?.let { viewModel.exportToDestinationUri(it) }
+    }
+
+    val exportMp4Launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("audio/mp4")
+    ) { uri: Uri? ->
+        uri?.let { viewModel.exportToDestinationUri(it) }
+    }
+
+    val exportWavLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("audio/x-wav")
     ) { uri: Uri? ->
         uri?.let { viewModel.exportToDestinationUri(it) }
     }
@@ -296,8 +312,13 @@ fun MainScreen(
                     onExportCustom = {
                         val title = uiState.metadata?.title?.ifBlank { "Lagu" } ?: "Lagu"
                         val artist = uiState.metadata?.artist?.ifBlank { "Artis" } ?: "Artis"
-                        val ext = uiState.metadata?.audioFormat?.extension ?: "mp3"
-                        exportFileLauncher.launch("${title} - ${artist}.${ext}")
+                        val format = uiState.metadata?.audioFormat ?: AudioFormat.MP3
+                        val suggestedName = "${title} - ${artist}.${format.extension}"
+                        when (format) {
+                            AudioFormat.MP4_AAC -> exportMp4Launcher.launch(suggestedName)
+                            AudioFormat.WAV -> exportWavLauncher.launch(suggestedName)
+                            else -> exportMp3Launcher.launch(suggestedName)
+                        }
                     }
                 )
 

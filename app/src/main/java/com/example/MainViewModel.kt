@@ -12,9 +12,9 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.mp3.AudioFormat
 import com.example.mp3.AudioMetadataEngine
 import com.example.mp3.ImageUtils
-import com.example.mp3.Mp3Id3Engine
 import com.example.mp3.Mp3Metadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -129,7 +129,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     com.example.mp3.SampleMp3Helper.createSampleMp3File(context)
                 }
                 val meta = withContext(Dispatchers.IO) {
-                    Mp3Id3Engine.extractMetadata(context, sampleFile)
+                    AudioMetadataEngine.extractMetadata(context, sampleFile)
                 }
                 prepareAudioPlayer(sampleFile)
                 _uiState.update {
@@ -262,7 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val source = state.sourceFile
         val meta = state.metadata
         if (source == null || meta == null) {
-            _uiState.update { it.copy(statusMessage = "Pilih file MP3 terlebih dahulu.") }
+            _uiState.update { it.copy(statusMessage = "Pilih file audio terlebih dahulu.") }
             return
         }
 
@@ -314,7 +314,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             put(MediaStore.Audio.Media.IS_PENDING, 1)
                         }
 
-                        val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+                        var activeMimeType = mimeType
+                        val uri = try {
+                            context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+                        } catch (e: IllegalArgumentException) {
+                            if (meta.audioFormat == AudioFormat.WAV) {
+                                activeMimeType = if (mimeType == "audio/x-wav") "audio/wav" else "audio/x-wav"
+                                contentValues.put(MediaStore.Audio.Media.MIME_TYPE, activeMimeType)
+                                context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+                            } else {
+                                throw e
+                            }
+                        }
                         if (uri != null) {
                             context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
                                 tempFile.inputStream().use { input ->
@@ -352,7 +363,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (physicalPath.isNullOrBlank()) {
                                 physicalPath = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "LishEdInfo/$safeFileName").absolutePath
                             }
-                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf(mimeType), null)
+                            MediaScannerConnection.scanFile(context, arrayOf(physicalPath), arrayOf(activeMimeType), null)
                         }
                         uri
                     } else {
